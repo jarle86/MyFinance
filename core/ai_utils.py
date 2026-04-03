@@ -148,6 +148,22 @@ class LLMClient:
                 elif clean_text.startswith("```"): clean_text = clean_text[3:]
                 if clean_text.endswith("```"): clean_text = clean_text[:-3]
                 
+                # Remove leading/trailing whitespace and any stray characters
+                clean_text = clean_text.strip()
+                
+                # Attempt to find valid JSON if wrapped in other text
+                if not clean_text.startswith('{'):
+                    # Try to find JSON object in response
+                    start_idx = clean_text.find('{')
+                    if start_idx != -1:
+                        clean_text = clean_text[start_idx:]
+                
+                if not clean_text.endswith('}'):
+                    # Try to find where JSON ends
+                    last_brace = clean_text.rfind('}')
+                    if last_brace != -1:
+                        clean_text = clean_text[:last_brace+1]
+                
                 data = json.loads(clean_text)
                 
                 # If schema provided, validate (supports Pydantic)
@@ -165,8 +181,10 @@ class LLMClient:
                 last_error = str(e)
                 logger.warning(f"Intento {i+1} fallido por error JSON/Pydantic: {last_error}")
                 if i < retries:
+                    # Sanitize error message to avoid breaking JSON in next prompt
+                    sanitized_error = last_error.replace('"', "'").replace('\n', ' ')[:200]
                     # Enrich prompt with error for next attempt
-                    current_prompt = f"{prompt}\n\nERROR PREVIO: {last_error}\nPor favor, corrige el JSON y asegúrate de cumplir el esquema."
+                    current_prompt = f"{prompt}\n\nERROR PREVIO: {sanitized_error}\nPor favor, corrige el JSON y asegúrate de cumplir el esquema."
                 else:
                     raise e
         
