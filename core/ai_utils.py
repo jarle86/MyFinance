@@ -2,7 +2,9 @@
 
 import logging
 import os
+import re
 from typing import Optional, Any
+from datetime import datetime
 
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -90,6 +92,8 @@ class LLMClient:
         system_prompt: Optional[str] = None,
     ) -> dict:
         """Generate a JSON response from the LLM.
+        
+        Uses robust JSON extraction to handle models that return text before/after JSON.
 
         Args:
             prompt: User prompt
@@ -111,7 +115,22 @@ class LLMClient:
             system_prompt=system_prompt,
         )
 
-        return json.loads(response_text.strip())
+        # Apply robust JSON extraction (same as retry logic)
+        clean_text = response_text.strip()
+        
+        # Remove markdown code fences
+        clean_text = re.sub(r'^```json\s*', '', clean_text, flags=re.MULTILINE)
+        clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
+        clean_text = re.sub(r'\s*```$', '', clean_text, flags=re.MULTILINE)
+        
+        # Find valid JSON boundaries
+        start_idx = clean_text.find('{')
+        end_idx = clean_text.rfind('}')
+        
+        if start_idx != -1 and end_idx != -1:
+            clean_text = clean_text[start_idx:end_idx+1]
+        
+        return json.loads(clean_text)
 
     def generate_json_with_retry(
         self,
@@ -123,11 +142,33 @@ class LLMClient:
         schema: Any = None,
         retries: int = 2,
     ) -> dict | Any:
-        """Generate JSON with automatic self-correction retries.
+        """Generate JSON with automatic self-correction retries and temporal context injection.
         
-        If parsing fails or fails validation, it sends the error back to the LLM.
+        Automatically injects current date/time to prevent "amnesia" in agents.
+        Handles models that return text before/after JSON with robust extraction.
+        
+        Args:
+            prompt: Base prompt
+            model: Model name
+            temperature: Temperature setting
+            max_tokens: Maximum tokens
+            system_prompt: Optional system prompt
+            schema: Optional Pydantic model for validation
+            retries: Number of retry attempts
+            
+        Returns:
+            Parsed and validated JSON response
         """
         import json
+        
+        # --- AUTOMATIC TEMPORAL CONTEXT INJECTION ---
+        now = datetime.now()
+        time_context = f"[CONTEXTO TEMPORAL ACTUAL: {now.strftime('%A, %d de %B de %Y, %H:%M:%S (%z)')}]"
+        
+        # Build enriched system prompt with temporal context
+        current_system_prompt = system_prompt or ""
+        if "[CONTEXTO TEMPORAL" not in current_system_prompt:
+            current_system_prompt = f"{time_context}\n\n{current_system_prompt}"
         
         current_prompt = prompt
         last_error = ""
@@ -139,53 +180,46 @@ class LLMClient:
                     model=model,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    system_prompt=system_prompt,
+                    system_prompt=current_system_prompt,
                 )
                 
-                # Cleanup JSON markdown
+                # --- ROBUST JSON EXTRACTION LOGIC ---
                 clean_text = response_text.strip()
-                if clean_text.startswith("```json"): clean_text = clean_text[7:]
-                elif clean_text.startswith("```"): clean_text = clean_text[3:]
-                if clean_text.endswith("```"): clean_text = clean_text[:-3]
                 
-                # Remove leading/trailing whitespace and any stray characters
-                clean_text = clean_text.strip()
+                # Remove markdown code fences aggressively
+                clean_text = re.sub(r'^```json\s*', '', clean_text, flags=re.MULTILINE)
+                clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
+                clean_text = re.sub(r'\s*```$', '', clean_text, flags=re.MULTILINE)
                 
-                # Attempt to find valid JSON if wrapped in other text
-                if not clean_text.startswith('{'):
-                    # Try to find JSON object in response
-                    start_idx = clean_text.find('{')
-                    if start_idx != -1:
-                        clean_text = clean_text[start_idx:]
+                # Find JSON boundaries
+                start_idx = clean_text.find('{')
+                end_idx = clean_text.rfind('}')
                 
-                if not clean_text.endswith('}'):
-                    # Try to find where JSON ends
-                    last_brace = clean_text.rfind('}')
-                    if last_brace != -1:
-                        clean_text = clean_text[:last_brace+1]
+                if start_idx != -1 and end_idx != -1:
+                    clean_text = clean_text[start_idx:end_idx+1]
                 
                 data = json.loads(clean_text)
                 
-                # If schema provided, validate (supports Pydantic)
+                # --- SCHEMA VALIDATION ---
                 if schema:
                     if hasattr(schema, "model_validate"):
                         instance = schema.model_validate(data)
-                        return instance
                     else:
                         instance = schema(**data)
-                        return instance
+                    return instance
                 
                 return data
                 
             except Exception as e:
                 last_error = str(e)
-                logger.warning(f"Intento {i+1} fallido por error JSON/Pydantic: {last_error}")
+                logger.warning(f"⚠️  Intento {i+1} fallido: {last_error[:100]}")
+                
                 if i < retries:
-                    # Sanitize error message to avoid breaking JSON in next prompt
-                    sanitized_error = last_error.replace('"', "'").replace('\n', ' ')[:200]
-                    # Enrich prompt with error for next attempt
-                    current_prompt = f"{prompt}\n\nERROR PREVIO: {sanitized_error}\nPor favor, corrige el JSON y asegúrate de cumplir el esquema."
+                    # Provide error feedback for self-correction
+                    sanitized_error = last_error.replace('"', "'").replace('\n', ' ')[:150]
+                    current_prompt = f"{prompt}\n\nERROR EN RESPUESTA ANTERIOR: {sanitized_error}\nPOR FAVOR: Responde SOLO un objeto JSON válido."
                 else:
+                    logger.error(f"❌ Agotados {retries} reintentos. Error final: {last_error}")
                     raise e
         
         return {}
@@ -367,6 +401,48 @@ def get_model_for_task(task_module: str) -> str:
         
     # 3. Default
     return DEFAULT_MODEL
+
+
+def get_temperature_for_task(task_module: str, default: float = 0.3) -> float:
+    """Get configured temperature for a specific task module.
+    
+    Allows fine-tuning LLM behavior per task from database without code changes.
+    
+    Hierarchy:
+    1. Database (sistema_config)
+    2. Environment (.env)
+    3. Default parameter
+    
+    Args:
+        task_module: Module name (e.g., "classification", "parsing", "evaluation")
+        default: Default temperature if not configured
+        
+    Returns:
+        Temperature value (0.0-1.0)
+    """
+    import os
+    from database import get_config_value
+
+    key = f"TEMPERATURA_{task_module.upper()}"
+    
+    # 1. Database
+    try:
+        temp = get_config_value(key)
+        if temp is not None:
+            return float(temp)
+    except Exception:
+        pass
+        
+    # 2. Environment
+    temp = os.getenv(key)
+    if temp:
+        try:
+            return float(temp)
+        except ValueError:
+            pass
+        
+    # 3. Default
+    return default
 
 
 def get_local_models() -> list[str]:
