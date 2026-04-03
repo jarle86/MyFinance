@@ -52,3 +52,6 @@ Thumbs.db
 .mypy_cache/
 node_modules/
 .ipynb_checkpoints
+check-jarle.sh
+docs/
+AGENTS.md

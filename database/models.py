@@ -99,6 +99,8 @@ class CuentaBase(BaseModel):
     # Préstamo fields
     monto_pagado: Decimal = Decimal("0")
     saldo_pendiente: Decimal = Decimal("0")
+    # Alias support for multiple names/synonyms
+    alias: Optional[list[str]] = []
 
 
 class Cuenta(CuentaBase):
@@ -122,6 +124,8 @@ class CategoriaBase(BaseModel):
     color: Optional[str] = None
     presupuesto: Optional[Decimal] = None
     alerta_umbral: Optional[Decimal] = None
+    # Alias support for multiple names/synonyms
+    alias: Optional[list[str]] = []
 
 
 class Categoria(CategoriaBase):

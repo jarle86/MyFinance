@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def ejecutar_lectura_segura(sql: str, params: Optional[tuple] = None) -> list[dict[str, Any]]:
-    """Execute a read-only SQL query safely.
+    """Execute a read-only SQL query safely with strict validation.
     
     Args:
         sql: SELECT query string.
@@ -24,20 +24,47 @@ def ejecutar_lectura_segura(sql: str, params: Optional[tuple] = None) -> list[di
         List of result rows as dicts.
         
     Raises:
-        ValueError: If query is not a SELECT.
+        ValueError: If query violates security rules.
     """
-    sql_clean = sql.strip().upper()
-    if not sql_clean.startswith("SELECT") and not sql_clean.startswith("WITH"):
+    if not sql or not isinstance(sql, str):
+        raise ValueError("SQL query must be a non-empty string")
+    
+    sql_clean = sql.strip()
+    sql_upper = sql_clean.upper()
+    
+    # 1. Only allow SELECT and WITH (CTEs)
+    if not (sql_upper.startswith("SELECT") or sql_upper.startswith("WITH")):
+        logger.warning(f"[SECURITY] Query does not start with SELECT/WITH: {sql_clean[:50]}")
         raise ValueError("Only SELECT or WITH queries are allowed in lectura_segura")
-
+    
+    # 2. Forbid dangerous keywords (mutating queries + dangerous functions)
+    forbidden_patterns = [
+        "DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "TRUNCATE",
+        "CREATE", "EXEC", "EXECUTE", "SCRIPT", "xp_", "sp_"
+    ]
+    for pattern in forbidden_patterns:
+        if f" {pattern} " in f" {sql_upper} " or sql_upper.startswith(f"{pattern} "):
+            logger.warning(f"[SECURITY] Forbidden keyword '{pattern}' in query: {sql_clean[:50]}")
+            raise ValueError(f"SQL keyword '{pattern}' is not allowed in read-only queries")
+    
+    # 3. Warn if query contains natural language (non-SQL tokens)
+    natural_lang_markers = ["calcular", "obtener", "mostrar", "dame", "cuánto", "total", "resumen"]
+    for marker in natural_lang_markers:
+        if marker in sql_upper:
+            logger.warning(f"[SECURITY] Possible natural language in SQL: '{marker}' found")
+    
+    logger.info(f"[ejecutar_lectura_segura] Ejecutando query: {sql_clean[:80]}")
+    
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, params)
-                columns = [desc[0] for desc in cur.description]
-                return [dict(zip(columns, row)) for row in cur.fetchall()]
+                cur.execute(sql_clean, params)
+                columns = [desc[0] for desc in cur.description] if cur.description else []
+                result = [dict(zip(columns, row)) for row in cur.fetchall()]
+                logger.info(f"[ejecutar_lectura_segura] Resultado: {len(result)} filas")
+                return result
     except Exception as e:
-        logger.error(f"Error en lectura_segura: {e}")
+        logger.error(f"[ejecutar_lectura_segura] Error: {e}")
         raise e
 
 

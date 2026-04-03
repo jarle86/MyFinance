@@ -46,7 +46,7 @@ if _project_root not in sys.path:
 
 # Now import everything else
 import logging
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from typing import Optional
 from uuid import UUID
 
@@ -1419,8 +1419,8 @@ def render_cuentas_tab(user_id: UUID):
         st.info("No hay cuentas. Crea una para comenzar.")
 
 
-def render_categorias_tab(user_id: UUID):
-    """Render categorías management tab."""
+def render_users_page():
+    """Render usuarios management page."""
     from database import (
         get_all_users_with_roles,
         update_user,

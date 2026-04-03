@@ -83,18 +83,14 @@ def _buscar_exacta(token: str, usuario_id: UUID) -> Optional[dict]:
         FROM cuentas
         WHERE usuario_id = %s
           AND activa = TRUE
-          AND (LOWER(nombre) LIKE %s
-               OR LOWER(nombre) LIKE %s
-               OR LOWER(nombre) LIKE %s)
+          AND nombre ILIKE %s
         LIMIT 1
     """
-    like_exacto = token
-    like_inicio = f"%{token}%"
-    like_fin = f"{token}%"
-
+    like_pattern = f"%{token}%"
+    
     result = execute_query(
         query,
-        (str(usuario_id), like_exacto, like_inicio, like_fin),
+        (str(usuario_id), like_pattern),
         fetch=True,
     )
 
@@ -104,9 +100,7 @@ def _buscar_exacta(token: str, usuario_id: UUID) -> Optional[dict]:
 
 
 def _buscar_vectorial(token: str, usuario_id: UUID, threshold: float) -> Optional[dict]:
-    """Phase 2: Vectorial search using pgvector.
-
-    Falls back to Levenshtein if pgvector not available.
+    """Phase 2: Simple similarity search (PostgreSQL compatible).
 
     Args:
         token: Normalized token
@@ -116,35 +110,52 @@ def _buscar_vectorial(token: str, usuario_id: UUID, threshold: float) -> Optiona
     Returns:
         Dict with id, nombre, similitud if found, None otherwise
     """
-    try:
-        query = """
-            SELECT id, nombre,
-                   1 - (levenshtein(LOWER(nombre), %s)::float / 
-                        GREATEST(LENGTH(nombre), LENGTH(%s))) as similitud
-            FROM cuentas
-            WHERE usuario_id = %s
-              AND activa = TRUE
-            ORDER BY similitud DESC
-            LIMIT 1
-        """
-        result = execute_query(
-            query,
-            (token, token, str(usuario_id)),
-            fetch=True,
-        )
-
-        if result and result[0].get("similitud", 0) >= threshold:
-            return result[0]
-    except Exception as e:
-        logger.warning(f"Vectorial search failed, using fallback: {e}")
-
-    return _buscar_fuzzy_fallback(token, usuario_id, threshold)
+    # Get all accounts for this user
+    query = """
+        SELECT id, nombre
+        FROM cuentas
+        WHERE usuario_id = %s
+          AND activa = TRUE
+        ORDER BY LENGTH(nombre)
+        LIMIT 10
+    """
+    result = execute_query(query, (str(usuario_id),), fetch=True)
+    
+    if not result:
+        return None
+    
+    # Calculate similarity for each account
+    best_match = None
+    best_similarity = 0
+    
+    token_lower = token.lower()
+    tokens = token_lower.split()  # Split into words
+    
+    for row in result:
+        nombre_lower = row["nombre"].lower()
+        
+        # Check if any token is contained in nombre
+        for word in tokens:
+            if word in nombre_lower:
+                similarity = len(word) / len(nombre_lower)
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                    best_match = {
+                        "id": row["id"],
+                        "nombre": row["nombre"],
+                        "similitud": min(similarity, 1.0)
+                    }
+    
+    if best_match and best_similarity >= threshold:
+        return best_match
+    
+    return None
 
 
 def _buscar_fuzzy_fallback(
     token: str, usuario_id: UUID, threshold: float
 ) -> Optional[dict]:
-    """Fallback fuzzy search using LIKE patterns.
+    """Fallback fuzzy search (SQLite compatible).
 
     Args:
         token: Normalized token
@@ -159,32 +170,36 @@ def _buscar_fuzzy_fallback(
         FROM cuentas
         WHERE usuario_id = %s
           AND activa = TRUE
-          AND (
-            LOWER(nombre) LIKE %s
-            OR LOWER(nombre) LIKE %s
-            OR %s = ANY(string_to_array(LOWER(nombre), ' '))
-          )
         ORDER BY LENGTH(nombre)
         LIMIT 5
     """
-    like_pattern = f"%{token}%"
-    tokens = token.split()
-
+    
     result = execute_query(
         query,
-        (str(usuario_id), like_pattern, f"{token}%", token),
+        (str(usuario_id),),
         fetch=True,
     )
 
+    if not result:
+        return None
+
+    # Find best match
+    best_match = None
+    token_lower = token.lower()
+    
     for row in result:
         nombre_lower = row["nombre"].lower()
-        if token in nombre_lower:
-            return {"id": row["id"], "nombre": row["nombre"], "similitud": 0.8}
+        # Partial match score
+        if token_lower in nombre_lower:
+            similarity = 0.8
+            best_match = {"id": row["id"], "nombre": row["nombre"], "similitud": similarity}
+            break  # Return first partial match
+    
+    # If no partial match, check first result
+    if not best_match and result:
+        best_match = {"id": result[0]["id"], "nombre": result[0]["nombre"], "similitud": 0.5}
 
-    if result:
-        return {"id": result[0]["id"], "nombre": result[0]["nombre"], "similitud": 0.5}
-
-    return None
+    return best_match
 
 
 def _obtener_sugerencias(usuario_id: UUID, limite: int = 5) -> list[str]:

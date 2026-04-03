@@ -172,9 +172,9 @@ class Processor:
 
         evaluacion = self.evaluador.evaluar(texto_extraido)
         
-        # Python Validation Layer (A3 -> Python -> A4)
-        if evaluacion.estado_global == "COMPLETADO":
-            evaluacion = self._validar_entidades_python(evaluacion, user_id)
+        # Python Validation Layer (ALWAYS executed - A3 output is just a suggestion)
+        # Python validates, infers, resolves entities, and determines final state
+        evaluacion = self._validar_entidades_python(evaluacion, user_id)
 
         if evaluacion.estado_global == "PENDIENTE":
             pregunta = self.chat.agrupar_preguntas(evaluacion)
@@ -261,36 +261,59 @@ class Processor:
         return datos
 
     def _validar_entidades_python(self, evaluacion, user_id: Optional[UUID]) -> any:
-        """Explicit Python Validation Layer for accounts and categories.
-        
-        Args:
-            evaluacion: EvaluacionSemantica from A3
-            user_id: User UUID
-            
-        Returns:
-            Updated EvaluacionSemantica
-        """
+        """Capa de Validación Determinista con Inferencia de Consumo."""
+
+        campos = evaluacion.campos
+
+        # 1. LOOP DE VALIDACIÓN CONTRA DB
         for nombre in ["origen", "destino", "categoria"]:
-            campo = evaluacion.campos.get(nombre)
-            if not campo or not campo.valor:
+            campo = campos.get(nombre)
+            if not campo: continue
+
+            # REGLA DE ORO: Si el destino es nulo pero tenemos concepto/categoría, hacemos el 'salto'
+            if nombre == "destino" and (not campo.valor or campo.accion == "preguntar"):
+                token_alternativo = campos.get("categoria").valor or campos.get("concepto").valor
+                if token_alternativo:
+                    logger.info(f"🔄 [PYTHON VALIDATION] Intentando 'salto' de Destino a: {token_alternativo}")
+                    campo.valor = token_alternativo
+
+            if not campo.valor:
                 continue
-                
-            # Perform DB lookup / Fuzzy search
+
+            # Búsqueda en DB (Fuzzy/Alias/Exacta)
             resultado = self.validation.validar_campo(
                 campo=nombre,
                 valor=campo.valor,
                 usuario_id=user_id
             )
-            
-            if not resultado["es_valido"]:
-                campo.accion = "preguntar"
-                campo.pregunta = resultado.get("pregunta")
-                evaluacion.estado_global = "PENDIENTE"
-            else:
-                # Update with official name or UUID
+
+            if resultado["es_valido"]:
+                # ÉXITO: Actualizamos con el nombre oficial y guardamos el UUID en metadata
                 campo.valor = str(resultado["valor_resuelto"])
-                campo.certeza = resultado["certeza"]
-                
+                campo.certeza = 100
+                campo.accion = "siguiente"
+                # Importante: Guardar el UUID para el Agente 5
+                campo.metadata = {"uuid": resultado.get("uuid")} 
+            else:
+                # FALLO: No encontrado en DB pero MANTENER el valor con certeza reducida
+                # (Permite refinamiento iterativo sin amnesia)
+                logger.warning(
+                    f"[PYTHON VALIDATION] {nombre}='{campo.valor}' not found in DB. "
+                    f"Keeping value with reduced certainty for refinement."
+                )
+                campo.certeza = max(30, campo.certeza - 30)  # Baja certeza pero NO borra
+                campo.accion = "siguiente"  # Permite avanzar pero marca como "soft pending"
+                # Opcionalmente: si quieres obligar a la pregunta, cambia a "preguntar"
+                # pero primer intenta pasar al siguiente turno
+                evaluacion.estado_global = "PENDIENTE"  # Mantén como pendiente para saber que hay trabajo
+
+        # 2. VERIFICACIÓN DE REQUERIDOS (Hard-Check)
+        # Si después de la validación, monto_total sigue sin valor, es PENDIENTE
+        monto = campos.get("monto_total")
+        if not monto or not monto.valor or monto.valor == 0:
+            monto.accion = "preguntar"
+            evaluacion.estado_global = "PENDIENTE"
+
         return evaluacion
 
     def _process_image(
@@ -499,7 +522,7 @@ class Processor:
         # 1. ESCAPE HATCH (Configurable keywords)
         keywords_str = ConfigLoader.get_keywords_escape()
         cancel_keywords = [k.strip().lower() for k in keywords_str.split(",")]
-        
+
         is_cancel = any(
             text_lower == kw or text_lower.startswith(kw + " ")
             for kw in cancel_keywords
@@ -561,21 +584,21 @@ class Processor:
                     if isinstance(pending_conv.datos, dict)
                     else json.loads(pending_conv.datos or "{}")
                 )
-                
+
                 # A4: Final Parser JSON (Pure record mapping)
                 logger.debug("A4: Final parse before commit")
                 parsing_result = self.accounting.process(
                     json.dumps(transaction_data),
                     usuario_id=str(pending_conv.usuario_id)
                 )
-                
+
                 if parsing_result.get("action") == "ERROR":
                     return ProcessResult(
                         route=Route.D,
                         response="Error técnico de formateo JSON (A4). ¿Qué dato deseas corregir?",
                         action="CORREGIR"
                     )
-                
+
                 final_json = parsing_result.get("entidades", {})
 
                 try:
@@ -660,7 +683,7 @@ class Processor:
                 if isinstance(pending_conv.datos, dict)
                 else json.loads(pending_conv.datos or "{}")
             )
-            
+
             from agents.evaluador_agent import EvaluacionSemantica
             try:
                 # Load previous valid inputs matching Pydantic structure
@@ -673,21 +696,36 @@ class Processor:
                 eval_anterior = EvaluacionSemantica(_razonamiento_previo="", campos={}, estado_global="PENDIENTE")
 
             # Mismo Evaluador re-evalua los nuevos inputs
+            logger.debug(
+                "[Modo interactivo] Re-evaluando datos: %s",
+                {"texto": text, "previo": eval_anterior.model_dump()},
+            )
             eval_nueva = self.evaluador.re_evaluar(text, eval_anterior)
-            
-            # Python Validation Layer (Recursive in Interactive Mode)
-            if eval_nueva.estado_global == "COMPLETADO":
-                eval_nueva = self._validar_entidades_python(eval_nueva, user_id)
-            
+
+            logger.info(
+                "[Modo interactivo] Resultado A3 estado_global=%s, campos_pendientes=%s",
+                eval_nueva.estado_global,
+                [nombre for nombre,v in eval_nueva.campos.items() if v.accion == "preguntar"],
+            )
+
+            # Python Validation Layer (ALWAYS executed - A3 output is just a suggestion)
+            # Python is the boss: validates, infers, and can override LLM state
+            eval_nueva = self._validar_entidades_python(eval_nueva, user_id)
+            logger.info(
+                "[Modo interactivo] Validación Python de entidades completada: estado_global=%s, campos_pendientes=%s",
+                eval_nueva.estado_global,
+                [nombre for nombre,v in eval_nueva.campos.items() if v.accion == "preguntar"],
+            )
+
             if eval_nueva.estado_global == "PENDIENTE":
                 pregunta = self.chat.agrupar_preguntas(eval_nueva) or "¿Puedes darme los datos que faltan?"
-                
+
                 # Extract actual missing fields for metadata
                 campos_faltantes = [
                     nombre for nombre, campo in eval_nueva.campos.items()
                     if campo.accion == "preguntar"
                 ]
-                
+
                 update_pending_conversation(
                     pending_conv.id,
                     datos=eval_nueva.model_dump(),
@@ -696,7 +734,7 @@ class Processor:
                     pregunta_actual=pregunta,
                     dato_faltante=campos_faltantes or ["general"]
                 )
-                
+
                 return ProcessResult(
                     route=Route.D,
                     response=pregunta,
@@ -709,16 +747,16 @@ class Processor:
                     for nombre, campo in eval_nueva.campos.items()
                     if campo.valor
                 }
-                
+
                 preview = self._generar_preview(eval_nueva)
-                
+
                 update_pending_conversation(
                     pending_conv.id,
                     datos=eval_nueva.model_dump(),
                     estado="esperando_confirmacion",
                     pregunta_actual=preview,
                 )
-                
+
                 confirmation_hint = "\n\n📌 Responde **'Confirmar'** para guardar o **'Cancelar'** para descartar."
                 return ProcessResult(
                     route=Route.D,
@@ -754,13 +792,11 @@ class Processor:
             logger.info(f"[PIPELINE] A3 EVALUADOR INPUT='{text[:80]}'")
             evaluu_raw = self.evaluador.evaluar(text)
             logger.info(f"[PIPELINE] A3 EVALUADOR OUTPUT estado_global='{evaluu_raw.estado_global}' campos_pendientes={[k for k,v in evaluu_raw.campos.items() if v.accion=='preguntar']}")
-            
-            # Python Validation Layer (A3 -> Python -> A4)
-            if evaluu_raw.estado_global == "COMPLETADO":
-                evaluacion = self._validar_entidades_python(evaluu_raw, user_id)
-                logger.info(f"[PIPELINE] PYTHON_VALIDATION OUTPUT estado_global='{evaluacion.estado_global}'")
-            else:
-                evaluacion = evaluu_raw
+
+            # Python Validation Layer (ALWAYS executed - A3 output is just a suggestion)
+            # Python validates, infers, resolves entities, and determines final state
+            evaluacion = self._validar_entidades_python(evaluu_raw, user_id)
+            logger.info(f"[PIPELINE] PYTHON_VALIDATION OUTPUT estado_global='{evaluacion.estado_global}' campos_pendientes={[k for k,v in evaluacion.campos.items() if v.accion=='preguntar']}")
 
             if evaluacion.estado_global == "PENDIENTE":
                 logger.info(f"[PIPELINE] A6 agrupar_preguntas INPUT campos_pendientes={[k for k,v in evaluacion.campos.items() if v.accion=='preguntar']}")
@@ -829,13 +865,13 @@ class Processor:
         elif intent == "consulta":
             # Migración a A5 Tool Calling
             result = self.dba.process_request(text, user_id=str(user_id))
-            
+
             if result.get("action") == "SQL_SUCCESS":
                 data = result.get("data", [])
                 response = self.chat.humanize(f"He consultado la base de datos: {json.dumps(data)}")
             else:
                 response = self.chat.humanize(result.get("response", "No encontré resultados."))
-            
+
             return ProcessResult(route=Route.B, response=response, data=result)
 
         else:
@@ -956,28 +992,28 @@ class Processor:
         """Get help message."""
         return """¡Bienvenido a MyFinance! 💰
 
-Puedo ayudarte con:
+    Puedo ayudarte con:
 
-📝 **Registrar gastos**
-"Pagué $500 en taxi"
-"Gasté 200 en supermercado"
+    📝 **Registrar gastos**
+    "Pagué $500 en taxi"
+    "Gasté 200 en supermercado"
 
-💰 **Consultar saldo**
-"¿Cuánto gasté este mes?"
-"¿Cuál es mi balance?"
+    💰 **Consultar saldo**
+    "¿Cuánto gasté este mes?"
+    "¿Cuál es mi balance?"
 
-📊 **Ver reportes**
-"Dame un reporte de febrero"
+    📊 **Ver reportes**
+    "Dame un reporte de febrero"
 
-📷 **Procesar receipts**
-"Envía una imagen de tu ticket"
+    📷 **Procesar receipts**
+    "Envía una imagen de tu ticket"
 
-Comandos:
-/status - Ver estado de cuenta
-/cancel - Cancelar operación
-/help - Ver esta ayuda
+    Comandos:
+    /status - Ver estado de cuenta
+    /cancel - Cancelar operación
+    /help - Ver esta ayuda
 
-¿En qué puedo ayudarte?"""
+    ¿En qué puedo ayudarte?"""
 
     def get_user_context(self, telegram_id: int) -> dict:
         """Get user context for conversation state."""
@@ -986,7 +1022,6 @@ Comandos:
     def set_user_context(self, telegram_id: int, context: dict) -> None:
         """Set user context for conversation state."""
         self._user_context[telegram_id] = context
-
 
 # Singleton processor
 processor = Processor()

@@ -3,6 +3,7 @@
 import json
 from datetime import date, datetime
 from decimal import Decimal
+import logging
 from typing import Optional
 from uuid import UUID
 
@@ -16,6 +17,8 @@ from database import (
     get_categoria_by_nombre,
     get_transacciones_by_user,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class DBAAgent:
@@ -43,6 +46,46 @@ class DBAAgent:
             )
 
         return prompt
+
+    def _sanitize_sql(self, sql: str, user_id: str) -> str:
+        """
+        Sanitize and clean LLM-generated SQL before execution.
+        
+        Removes natural language artifacts and enforces user_id filtering.
+        
+        Args:
+            sql: Raw SQL from LLM
+            user_id: Current user UUID as string
+            
+        Returns:
+            Sanitized SQL string
+            
+        Raises:
+            ValueError: If SQL contains prohibited patterns or natural language
+        """
+        if not sql or not isinstance(sql, str):
+            raise ValueError("SQL must be a non-empty string")
+        
+        # Remove common natural language markers that might be in SQL
+        natural_lang_markers = [
+            "calcular", "obtener", "mostrar", "dame", "cuánto", 
+            "resumen", "total", "suma", "promedio", "listar",
+            "dame el", "quiero", "por favor", "buscar", "encuentra"
+        ]
+        
+        sql_lower = sql.lower()
+        for marker in natural_lang_markers:
+            if marker in sql_lower and sql_lower.find("select") == -1:
+                raise ValueError(f"Possible natural language in SQL: '{marker}' detected")
+        
+        # Enforce user_id filtering if not present
+        if "where" in sql_lower:
+            if "usuario_id" not in sql_lower and f"'{user_id}'" not in sql:
+                logger.warning(f"[A5 sanitize] SQL has WHERE but no usuario_id filter. Appending...")
+                sql = sql.rstrip(";") + f" AND usuario_id = '{user_id}';"
+        
+        logger.debug(f"[A5 sanitize] SQL sanitized successfully (length: {len(sql)})")
+        return sql
 
     def process_request(
         self,
@@ -111,14 +154,31 @@ class DBAAgent:
                 args = json.loads(tool_call.function.arguments)
                 
                 if fn_name == "ejecutar_lectura_segura":
-                    res = ejecutar_lectura_segura(args["sql"])
-                    results.append({"tool": fn_name, "result": res})
+                    try:
+                        # Clean and validate SQL before execution
+                        sql_query = args.get("sql", "")
+                        sql_cleaned = self._sanitize_sql(sql_query, user_id)
+                        logger.debug(f"[A5 execute_tool] Cleaned SQL: {sql_cleaned[:100]}")
+                        
+                        res = ejecutar_lectura_segura(sql_cleaned)
+                        results.append({"tool": fn_name, "result": res})
+                    except ValueError as e:
+                        logger.warning(f"[A5 execute_tool] SQL validation error: {e}")
+                        results.append({"tool": fn_name, "error": str(e)})
+                    except Exception as e:
+                        logger.error(f"[A5 execute_tool] Execution error: {e}")
+                        results.append({"tool": fn_name, "error": str(e)})
+                        
                 elif fn_name == "ejecutar_transaccion_doble":
-                    res = ejecutar_transaccion_doble(
-                        usuario_id=UUID(user_id),
-                        **args
-                    )
-                    results.append({"tool": fn_name, "result": res})
+                    try:
+                        res = ejecutar_transaccion_doble(
+                            usuario_id=UUID(user_id),
+                            **args
+                        )
+                        results.append({"tool": fn_name, "result": res})
+                    except Exception as e:
+                        logger.error(f"[A5 execute_tool] Transaction error: {e}")
+                        results.append({"tool": fn_name, "error": str(e)})
 
             logger.info(f"[A5 SQL] OUTPUT execution_results={results}")
             return {

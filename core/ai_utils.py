@@ -1,5 +1,6 @@
 """LLM client for MyFinance using OpenAI-compatible API (Ollama proxy)."""
 
+import logging
 import os
 from typing import Optional, Any
 
@@ -9,6 +10,7 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "qwen2.5:3b"
 

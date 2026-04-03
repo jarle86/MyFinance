@@ -102,7 +102,7 @@ class EvaluadorAgent:
         try:
             prompt = f"Texto a evaluar:\n{texto}"
             model, temp, tokens, _ = self._get_model_config()
-            logger.info(f"[A3 EVALUAR] INPUT model='{model}' texto='{texto[:100]}'")
+            logger.info("[A3 EVALUAR] Inicio de evaluación A3", extra={"texto_corto": texto[:100], "model": model})
 
             from core.ai_utils import generate_json_with_retry
             
@@ -115,7 +115,12 @@ class EvaluadorAgent:
                 schema=None
             )
 
-            logger.info(f"[A3 EVALUAR] RAW LLM JSON keys={list(result.keys())} estado_global='{result.get('estado_global')}' entidades={list(result.get('entidades', result.get('campos', {})).keys())}")
+            logger.info(
+                "[A3 EVALUAR] RAW LLM JSON keys=%s estado_global=%s entidades=%s",
+                list(result.keys()),
+                result.get("estado_global"),
+                list(result.get("entidades", result.get("campos", {})).keys()),
+            )
 
             evaluacion = self._procesar_resultado_llm(result, texto)
             logger.info(
@@ -141,24 +146,55 @@ class EvaluadorAgent:
         Returns:
             EvaluacionSemantica with validated fields
         """
-        entidades = result.get("entidades", {})
+        # Extract using "campos" (new prompt) or "entidades" (legacy)
+        entidades_raw = result.get("campos", result.get("entidades", {}))
         razonamiento = result.get("_razonamiento_previo", "")
 
         campos_eval = {}
         preguntas = []
 
         for campo_nombre in self.CAMPOS_EVALUACION:
+            # LLM now returns nested dicts per field
+            # E.g. "monto_total": {"valor": 500, "certeza": 95, "accion": "siguiente"}
+            datos_del_campo = entidades_raw.get(campo_nombre, {})
+            
+            # Extract actual value for validator
+            valor_extraido = datos_del_campo.get("valor") if isinstance(datos_del_campo, dict) else datos_del_campo
+            # Convert to string for consistency with CampoEvaluado model
+            valor_extraido = str(valor_extraido) if valor_extraido is not None else None
+            
+            # Extract pre-calculated certeza from LLM to avoid redundant calls
+            certeza_llm = None
+            if isinstance(datos_del_campo, dict) and "certeza" in datos_del_campo:
+                certeza_llm = int(datos_del_campo.get("certeza", 0))
+            
             campo_eval = self._evaluar_campo(
-                campo_nombre,
-                entidades.get(campo_nombre),
-                texto_original,
+                nombre=campo_nombre,
+                valor=valor_extraido,
+                texto_original=texto_original,
+                certeza_precalculada=certeza_llm,
             )
             campos_eval[campo_nombre] = campo_eval
+
+            logger.debug(
+                "[A3 campo] %s => valor=%s, certeza=%s, accion=%s",
+                campo_nombre,
+                campo_eval.valor,
+                campo_eval.certeza,
+                campo_eval.accion,
+            )
 
             if campo_eval.accion == "preguntar" and campo_eval.pregunta:
                 preguntas.append(campo_eval.pregunta)
 
         estado = self._determinar_estado_global(campos_eval)
+
+        logger.info(
+            "[A3 resumen] estado_global=%s preguntas=%s campos_pendientes=%s",
+            estado,
+            preguntas,
+            [k for k,v in campos_eval.items() if v.accion == "preguntar"],
+        )
 
         preguntas_agrupadas = self._agrupar_preguntas(preguntas) if preguntas else None
 
@@ -174,6 +210,7 @@ class EvaluadorAgent:
         nombre: str,
         valor: Optional[str],
         texto_original: str,
+        certeza_precalculada: Optional[int] = None,
     ) -> CampoEvaluado:
         """Evaluate a single field using CoT + Tool Calling.
 
@@ -181,6 +218,7 @@ class EvaluadorAgent:
             nombre: Field name
             valor: Extracted value from LLM
             texto_original: Original text for context
+            certeza_precalculada: Pre-calculated certainty from LLM (optimization)
 
         Returns:
             CampoEvaluado with evaluation results
@@ -188,16 +226,32 @@ class EvaluadorAgent:
         es_requerido = self._es_campo_requerido(nombre)
         threshold = self._get_threshold(nombre)
 
+        logger.debug(
+            "[A3 _evaluar_campo] Iniciando campo=%s valor=%s requerido=%s",
+            nombre,
+            valor,
+            es_requerido,
+        )
+
         if not valor:
             if es_requerido:
+                pregunta = self._generar_pregunta(nombre)
+                logger.warning(
+                    "[A3 _evaluar_campo] Campo requerido faltante %s -> preguntar",
+                    nombre,
+                )
                 return CampoEvaluado(
                     nombre=nombre,
                     valor=None,
                     certeza=0,
                     es_requerido=True,
                     accion="preguntar",
-                    pregunta=self._generar_pregunta(nombre),
+                    pregunta=pregunta,
                 )
+            logger.info(
+                "[A3 _evaluar_campo] Campo opcional faltante %s -> skip",
+                nombre,
+            )
             return CampoEvaluado(
                 nombre=nombre,
                 valor=None,
@@ -207,9 +261,27 @@ class EvaluadorAgent:
                 pregunta=None,
             )
 
-        certeza = self._evaluar_certeza(nombre, valor, texto_original)
+        # Use pre-calculated certainty from LLM or fallback to CoT
+        if certeza_precalculada is not None:
+            certeza = certeza_precalculada
+            logger.debug(
+                "[A3 _evaluar_campo] Usando certeza del LLM para campo=%s: %s",
+                nombre,
+                certeza,
+            )
+        else:
+            logger.warning(
+                "[A3 _evaluar_campo] Fallback CoT para campo=%s (no pre-calculated)",
+                nombre,
+            )
+            certeza = self._evaluar_certeza(nombre, valor, texto_original)
 
-        certeza = self._evaluar_certeza(nombre, valor, texto_original)
+        logger.debug(
+            "[A3 _evaluar_campo] Campo=%s certeza=%s threshold=%s",
+            nombre,
+            certeza,
+            threshold,
+        )
 
         # Decision based on semantic certainty
         if certeza >= threshold:
@@ -295,8 +367,13 @@ Responde solo con un número entre 0 y 100.
         """
         for campo in campos.values():
             if campo.es_requerido and campo.accion == "preguntar":
+                logger.info(
+                    "[A3 _determinar_estado_global] Pendiente encontrado en campo %s",
+                    campo.nombre,
+                )
                 return "PENDIENTE"
 
+        logger.info("[A3 _determinar_estado_global] Todos los campos requeridos completados")
         return "COMPLETADO"
 
     def _generar_pregunta(self, campo: str) -> str:
@@ -352,12 +429,22 @@ Responde solo con un número entre 0 y 100.
 Datos anteriores: {json.dumps(self._extraer_datos_validos(evaluacion_anterior))}
 Nueva información del usuario: {respuesta_usuario}
 """
+        logger.info(
+            "[A3 re_evaluar] Re-evaluar con respuesta_usuario=%s, datos_previos=%s",
+            respuesta_usuario,
+            self._extraer_datos_validos(evaluacion_anterior),
+        )
         return self.evaluar(texto_combinado)
 
     def _extraer_datos_validos(self, evaluacion: EvaluacionSemantica) -> dict:
-        """Extract valid fields from previous evaluation."""
+        """Extrae TODOS los valores capturados, válidos o no, para mantener la memoria.
+        
+        IMPORTANTE: No filtrar por accion=="siguiente" porque eso causa amnesia.
+        El LLM necesita VER los valores previos aunque Python aún no los haya validado.
+        """
         datos = {}
         for nombre, campo in evaluacion.campos.items():
-            if campo.valor and campo.accion == "siguiente":
+            # Si el campo tiene un valor, lo pasamos a la memoria (aunque sea para corregirlo)
+            if campo.valor:
                 datos[nombre] = campo.valor
         return datos

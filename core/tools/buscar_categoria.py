@@ -88,12 +88,13 @@ def _buscar_exacta(token: str, usuario_id: Optional[UUID]) -> Optional[dict]:
             FROM categorias
             WHERE usuario_id = %s
               AND activa = TRUE
-              AND LOWER(nombre) LIKE %s
+              AND nombre ILIKE %s
             LIMIT 1
         """
+        like_pattern = f"%{token}%"
         result = execute_query(
             query,
-            (str(usuario_id), token),
+            (str(usuario_id), like_pattern),
             fetch=True,
         )
         if result:
@@ -104,10 +105,11 @@ def _buscar_exacta(token: str, usuario_id: Optional[UUID]) -> Optional[dict]:
         FROM categorias
         WHERE usuario_id IS NULL
           AND activa = TRUE
-          AND LOWER(nombre) LIKE %s
+          AND nombre ILIKE %s
         LIMIT 1
     """
-    result = execute_query(query, (token,), fetch=True)
+    like_pattern = f"%{token}%"
+    result = execute_query(query, (like_pattern,), fetch=True)
     if result:
         return result[0]
 
@@ -117,7 +119,7 @@ def _buscar_exacta(token: str, usuario_id: Optional[UUID]) -> Optional[dict]:
 def _buscar_vectorial(
     token: str, usuario_id: Optional[UUID], threshold: float
 ) -> Optional[dict]:
-    """Phase 2: Fuzzy search for categories.
+    """Phase 2: Simple similarity search for categories (PostgreSQL compatible).
 
     Searches user categories first, then global categories.
 
@@ -129,45 +131,58 @@ def _buscar_vectorial(
     Returns:
         Dict with id, nombre, similitud if found, None otherwise
     """
+    token_lower = token.lower()
+    tokens = token_lower.split()  # Split into words
+    
+    # Search user categories first
     if usuario_id:
         query = """
-            SELECT id, nombre,
-                   1 - (levenshtein(LOWER(nombre), %s)::float / 
-                        GREATEST(LENGTH(nombre), LENGTH(%s))) as similitud
+            SELECT id, nombre
             FROM categorias
             WHERE usuario_id = %s
               AND activa = TRUE
-            ORDER BY similitud DESC
-            LIMIT 1
+            ORDER BY LENGTH(nombre)
+            LIMIT 10
         """
-        result = execute_query(
-            query,
-            (token, token, str(usuario_id)),
-            fetch=True,
-        )
-
-        if result and result[0].get("similitud", 0) >= threshold:
-            return result[0]
-
+        result = execute_query(query, (str(usuario_id),), fetch=True)
+        
+        if result:
+            for row in result:
+                nombre_lower = row["nombre"].lower()
+                for word in tokens:
+                    if word in nombre_lower:
+                        similarity = len(word) / len(nombre_lower)
+                        if similarity >= threshold:
+                            return {
+                                "id": row["id"],
+                                "nombre": row["nombre"],
+                                "similitud": min(similarity, 1.0)
+                            }
+    
+    # Search global categories
     query = """
-        SELECT id, nombre,
-               1 - (levenshtein(LOWER(nombre), %s)::float / 
-                    GREATEST(LENGTH(nombre), LENGTH(%s))) as similitud
+        SELECT id, nombre
         FROM categorias
         WHERE usuario_id IS NULL
           AND activa = TRUE
-        ORDER BY similitud DESC
-        LIMIT 1
+        ORDER BY LENGTH(nombre)
+        LIMIT 10
     """
-    result = execute_query(
-        query,
-        (token, token),
-        fetch=True,
-    )
-
-    if result and result[0].get("similitud", 0) >= threshold:
-        return result[0]
-
+    result = execute_query(query, tuple(), fetch=True)
+    
+    if result:
+        for row in result:
+            nombre_lower = row["nombre"].lower()
+            for word in tokens:
+                if word in nombre_lower:
+                    similarity = len(word) / len(nombre_lower)
+                    if similarity >= threshold:
+                        return {
+                            "id": row["id"],
+                            "nombre": row["nombre"],
+                            "similitud": min(similarity, 1.0)
+                        }
+    
     return None
 
 

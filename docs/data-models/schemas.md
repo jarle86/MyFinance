@@ -100,6 +100,9 @@ CREATE TABLE cuentas (
     icono VARCHAR(50),
     descripcion TEXT,
     
+    -- Alias support for multiple names/synonyms
+    alias TEXT[] DEFAULT '{}',
+    
     -- Metadata
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -112,6 +115,7 @@ CREATE TABLE cuentas (
 CREATE INDEX idx_cuentas_usuario ON cuentas(usuario_id);
 CREATE INDEX idx_cuentas_tipo ON cuentas(tipo);
 CREATE INDEX idx_cuentas_padre ON cuentas(padre_id);
+CREATE INDEX idx_cuentas_alias ON cuentas USING GIN(alias);
 ```
 
 | Column | Type | Description |
@@ -125,6 +129,13 @@ CREATE INDEX idx_cuentas_padre ON cuentas(padre_id);
 | `saldo_inicial` | DECIMAL | Opening balance |
 | `saldo_actual` | DECIMAL | Current balance |
 | `moneda` | VARCHAR | Currency code |
+| `color` | VARCHAR | Hex color code |
+| `icono` | VARCHAR | Icon identifier |
+| `descripcion` | TEXT | Account description |
+| `alias` | TEXT[] | Array of alternative names/synonyms |
+| `created_at` | TIMESTAMP | Creation timestamp |
+| `updated_at` | TIMESTAMP | Last update timestamp |
+| `activa` | BOOLEAN | Active status |
 
 ### 3.2 categorias (Categories)
 
@@ -141,11 +152,15 @@ CREATE TABLE categorias (
     presupuesto DECIMAL(15,2),
     alerta_umbral DECIMAL(5,2), -- Percentage
     
+    -- Alias support for multiple names/synonyms
+    alias TEXT[] DEFAULT '{}',
+    
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     activa BOOLEAN DEFAULT TRUE
 );
 
 CREATE INDEX idx_categorias_usuario ON categorias(usuario_id);
+CREATE INDEX idx_categorias_alias ON categorias USING GIN(alias);
 ```
 
 ### 3.3 transacciones (Transactions)

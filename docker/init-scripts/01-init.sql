@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS cuentas (
     -- Préstamo fields
     monto_pagado DECIMAL(15,2) DEFAULT 0,
     saldo_pendiente DECIMAL(15,2) DEFAULT 0,
+    -- Alias support for multiple names/synonyms
+    alias TEXT[] DEFAULT '{}',
     -- Metadata
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -83,11 +85,15 @@ CREATE TABLE IF NOT EXISTS categorias (
     padre_id UUID REFERENCES categorias(id),
     presupuesto DECIMAL(15,2),
     alerta_umbral DECIMAL(5,2),
+    -- Alias support for multiple names/synonyms
+    alias TEXT[] DEFAULT '{}',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     activa BOOLEAN DEFAULT TRUE
 );
 
 CREATE INDEX IF NOT EXISTS idx_categorias_usuario ON categorias(usuario_id);
+CREATE INDEX IF NOT EXISTS idx_cuentas_alias ON cuentas USING GIN(alias);
+CREATE INDEX IF NOT EXISTS idx_categorias_alias ON categorias USING GIN(alias);
 
 -- ===========================================
 -- TRANSACCIONES (Transactions)
