@@ -56,6 +56,7 @@ class AccountingAgent:
 
     def process(self, text: str, usuario_id: str = None) -> dict:
         """A4: Mapea a esquema JSON sin cuestionarlo (Regla Agente A4)."""
+        logger.info(f"[A4 PARSE] INPUT model='{get_model_for_task('A4')}' text='{text[:100]}...'")
         try:
             from core.ai_utils import generate_json_with_retry
             
@@ -69,6 +70,8 @@ class AccountingAgent:
             
             entidades = result.model_dump()
             entidades = self._apply_fuzzy_matching(entidades, usuario_id)
+            
+            logger.info(f"[A4 PARSE] OUTPUT entidades={entidades}")
             
             return {
                 "action": "PROCESAR",

@@ -92,6 +92,7 @@ class DBAAgent:
         ]
 
         try:
+            logger.info(f"[A5 SQL] INPUT model='{get_model_for_task('A5')}' user_message='{user_message[:100]}...'")
             client = get_llm_client()
             message = client.generate_with_tools(
                 prompt=f"Usuario ID: {user_id}\nMensaje: {user_message}",
@@ -101,6 +102,7 @@ class DBAAgent:
             )
 
             if not message.tool_calls:
+                logger.info(f"[A5 SQL] OUTPUT chat_response='{message.content[:50]}...'")
                 return {"response": message.content, "action": "CHAT"}
 
             results = []
@@ -118,6 +120,7 @@ class DBAAgent:
                     )
                     results.append({"tool": fn_name, "result": res})
 
+            logger.info(f"[A5 SQL] OUTPUT execution_results={results}")
             return {
                 "response": "Operaciones completadas.",
                 "data": results,

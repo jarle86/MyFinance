@@ -153,6 +153,8 @@ class OCRAgent:
                 },
             ]
 
+            logger.info(f"[A2 OCR] INPUT vision_model='{get_model_for_task('A2')}'")
+            
             data = generate_json_response(
                 prompt="Extrae datos del recibo.",
                 model=get_model_for_task("A2"),
@@ -161,6 +163,8 @@ class OCRAgent:
                 system_prompt=prompt,
                 messages=messages # Passes vision messages directly
             )
+
+            logger.info(f"[A2 OCR] OUTPUT data={data}")
 
             return {
                 "response": f"Recibo procesado: {data.get('monto', '?')} - {data.get('proveedor', '?')}",
