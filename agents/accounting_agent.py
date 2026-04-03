@@ -70,16 +70,23 @@ class AccountingAgent:
         try:
             from core.ai_utils import generate_json_with_retry
 
-            # TASK_PARSE debe ser instruido para mapear campos nulos o existentes al esquema final
+            # 1. Quitamos schema=AsientoContable para que Pydantic no borre los datos anidados
             result = generate_json_with_retry(
                 prompt=data_json,
                 model=model,
                 temperature=temp,
                 system_prompt=self._get_parse_prompt(),
-                schema=AsientoContable,
+                schema=None,  # <-- FIJAMOS EN NONE
             )
 
-            entidades = result.model_dump()
+            # 2. Extraemos el bloque 'entidades' que pedimos en el prompt
+            if isinstance(result, dict):
+                entidades = result.get("entidades", result)  # Fallback por si lo manda plano
+            else:
+                logger.error("[A4] El LLM no devolvió un diccionario JSON válido.")
+                raise ValueError("Formato JSON inválido")
+
+            # 3. Aplicamos lógica de matching borroso
             entidades = self._apply_fuzzy_matching(entidades, usuario_id)
 
             logger.info(f"[A4] OUTPUT: {entidades}")

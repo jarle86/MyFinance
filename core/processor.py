@@ -281,21 +281,8 @@ class Processor:
         # 1. LOOP DE VALIDACIÓN CONTRA DB
         for nombre in ["origen", "destino", "categoria"]:
             campo = campos.get(nombre)
-            if not campo:
+            if not campo or not campo.valor:
                 continue
-
-
-            if not campo.valor:
-                continue
-
-        # 1.1 Resolución de Fecha Relativa (hoy)
-        fecha = campos.get("fecha")
-        if fecha and (not fecha.valor or "hoy" in str(fecha.valor).lower()):
-            from datetime import date
-            fecha.valor = date.today().isoformat()
-            fecha.certeza = 100
-            fecha.accion = "siguiente"
-            logger.info(f"📅 [PYTHON VALIDATION] Fecha resuelta como hoy: {fecha.valor}")
 
             # Búsqueda en DB (Fuzzy/Alias/Exacta)
             resultado = self.validation.validar_campo(
@@ -307,19 +294,24 @@ class Processor:
                 campo.valor = str(resultado["valor_resuelto"])
                 campo.certeza = 100
                 campo.accion = "siguiente"
+                # 🚀 EL FIX: Capturamos el UUID que ahora sí envía ValidationLayer
                 campo.metadata = {"uuid": resultado.get("uuid")}
+                logger.info(f"✅ [PYTHON VALIDATION] {nombre} resuelto: {campo.valor} (ID: {campo.metadata['uuid']})")
             else:
                 # FALLO: No encontrado en DB
-                # Bajar certeza para forzar revisión/pregunta
-                logger.warning(
-                    f"[PYTHON VALIDATION] {nombre}='{campo.valor}' not found in DB."
-                )
+                logger.warning(f"⚠️ [PYTHON VALIDATION] {nombre}='{campo.valor}' no encontrado en DB.")
                 campo.certeza = max(10, campo.certeza - 40)
-                
-                # Siempre obligamos a preguntar si no está en DB oficial, 
-                # para que el Agente o el usuario lo resuelvan.
                 campo.accion = "preguntar"
                 evaluacion.estado_global = "PENDIENTE"
+
+        # 1.1 Resolución de Fecha Relativa (hoy)
+        fecha = campos.get("fecha")
+        if fecha and (not fecha.valor or "hoy" in str(fecha.valor).lower()):
+            from datetime import date
+            fecha.valor = date.today().isoformat()
+            fecha.certeza = 100
+            fecha.accion = "siguiente"
+            logger.info(f"📅 [PYTHON VALIDATION] Fecha resuelta como hoy: {fecha.valor}")
 
         # 2. VERIFICACIÓN DE REQUERIDOS (Hard-Check)
         # Monto es obligatorio

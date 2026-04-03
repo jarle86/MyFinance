@@ -139,12 +139,12 @@ class ValidationLayer:
 
             if resultado["status"] == "found":
                 confidence_pct = int(resultado["confidence"] * 100)
+                # 🚀 EL FIX: Pasamos el UUID explícitamente y dejamos valor_resuelto para la UI
                 return {
                     "es_valido": confidence_pct >= threshold,
                     "certeza": confidence_pct,
-                    "valor_resuelto": resultado.get("uuid")
-                    or resultado.get("nombre")
-                    or valor,
+                    "valor_resuelto": resultado.get("nombre") or valor,
+                    "uuid": resultado.get("uuid") or resultado.get("id"),
                     "fase": resultado.get("fase", 0),
                     "pregunta": None,
                 }

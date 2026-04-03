@@ -358,12 +358,12 @@ Responde solo con un número entre 0 y 100.
                 system_prompt="Eres un evaluador de certeza. Responde solo con un JSON con el campo 'certeza'.",
             )
 
-            certeza = int(result.get("certeza", 50))
+            certeza = int(result.get("certeza", 90))
             return max(0, min(100, certeza))
 
         except Exception as e:
             logger.warning(f"Error evaluando certeza para {campo}: {e}")
-            return 50
+            return 90
 
     def _es_campo_requerido(self, campo: str) -> bool:
         """Check if a field is required - uses ConfigLoader (DB) with user_config override."""

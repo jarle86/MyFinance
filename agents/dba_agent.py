@@ -1,4 +1,4 @@
-"""DBA Agent (A3) - SQL generation, validation and execution for MyFinance."""
+"""DBA Agent (A5) - SQL generation, validation and execution for MyFinance."""
 
 import json
 from datetime import date, datetime
@@ -256,40 +256,72 @@ class DBAAgent:
             # - Expense: Debe = Category, Haber = Account
             # - Income: Debe = Account, Haber = Category
 
+            # 🚀 EL FIX: Priorizar monto_total y manejar correctamente los None
             tipo = transaction_data.get("tipo", "gasto").lower()
-            monto = float(transaction_data.get("monto", 0))
-            cuenta_nombre = transaction_data.get("origen") or transaction_data.get(
-                "destino"
-            )
-            cat_nombre = transaction_data.get("categoria") or transaction_data.get(
-                "concepto"
-            )
+            
+            monto_raw = transaction_data.get("monto_total") or transaction_data.get("monto")
+            monto = float(monto_raw) if monto_raw is not None else 0.0
+            
+            # 🚀 EL FIX DEFINITIVO PARA LOS UUIDs
+            import uuid
 
-            cuenta = get_cuenta_by_nombre(user_id, cuenta_nombre)
-            categoria = get_categoria_by_nombre(cat_nombre)
+            def extract_uuid(val):
+                if not val: return None
+                try:
+                    return str(uuid.UUID(str(val)))
+                except ValueError:
+                    return None
 
-            if not cuenta:
+            origen_val = transaction_data.get("origen")
+            destino_val = transaction_data.get("destino")
+            cat_val = transaction_data.get("categoria") or transaction_data.get("descripcion")
+
+            # 1. Resolver Cuentas (Origen y Destino)
+            origen_id = extract_uuid(origen_val)
+            if not origen_id:
+                c = get_cuenta_by_nombre(user_id, origen_val)
+                if c:
+                    origen_id = str(c.id)
+
+            destino_id = extract_uuid(destino_val)
+            if not destino_id:
+                c = get_cuenta_by_nombre(user_id, destino_val)
+                if c:
+                    destino_id = str(c.id)
+
+            # 2. Resolver Categoría ID (opcional para la lógica contable estricta, pero se guarda)
+            cat_id = extract_uuid(cat_val)
+            if not cat_id:
+                cat = get_categoria_by_nombre(cat_val)
+                if cat:
+                    cat_id = str(cat.id)
+
+            # 3. Validar que tenemos ambas cuentas (Debe y Haber)
+            if not origen_id:
+                logger.warning(f"[A5] Error: Cuenta de Origen '{origen_val}' no resuelta.")
                 return {
-                    "response": f"Cuenta '{cuenta_nombre}' no encontrada.",
-                    "error": "cuenta_not_found",
+                    "response": f"Error: Cuenta de Origen '{origen_val}' no encontrada.",
+                    "error": "origen_not_found",
                 }
-            if not categoria:
+            if not destino_id:
+                logger.warning(f"[A5] Error: Cuenta de Destino '{destino_val}' no resuelta.")
                 return {
-                    "response": f"Categoría '{cat_nombre}' no encontrada.",
-                    "error": "categoria_not_found",
+                    "response": f"Error: Cuenta de Destino '{destino_val}' no encontrada.",
+                    "error": "destino_not_found",
                 }
 
+            # 4. Asignar Partida Doble: Origen (Haber) -> Destino (Debe) para gastos
             if tipo == "ingreso":
-                debe_id, haber_id = cuenta.id, categoria.id
+                debe_id, haber_id = origen_id, destino_id
             else:
-                debe_id, haber_id = categoria.id, cuenta.id
+                debe_id, haber_id = destino_id, origen_id
 
             result = ejecutar_transaccion_doble(
                 usuario_id=user_id,
                 debe_id=debe_id,
                 haber_id=haber_id,
                 monto=monto,
-                concepto=transaction_data.get("concepto", "Registro 4.0"),
+                concepto=transaction_data.get("descripcion") or "Registro 4.0",
                 fecha=transaction_data.get("fecha"),
                 fuente=fuente,
                 proveedor=transaction_data.get("proveedor"),
