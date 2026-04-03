@@ -56,6 +56,7 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int = 2048,
         system_prompt: Optional[str] = None,
+        response_format: Optional[dict] = None,
     ) -> str:
         """Generate a response from the LLM.
 
@@ -65,6 +66,7 @@ class LLMClient:
             temperature: Temperature setting
             max_tokens: Maximum tokens to generate
             system_prompt: Optional system prompt
+            response_format: Optional format spec (e.g., {"type": "json_object"})
 
         Returns:
             Generated text response
@@ -74,12 +76,18 @@ class LLMClient:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        response = self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        
+        # Add response_format if specified (JSON mode for Ollama)
+        if response_format:
+            kwargs["response_format"] = response_format
+
+        response = self.client.chat.completions.create(**kwargs)
 
         return response.choices[0].message.content
 
@@ -87,18 +95,19 @@ class LLMClient:
         self,
         prompt: str,
         model: str = DEFAULT_MODEL,
-        temperature: float = 0.3,
+        temperature: float = 0.1,
         max_tokens: int = 2048,
         system_prompt: Optional[str] = None,
     ) -> dict:
-        """Generate a JSON response from the LLM.
+        """Generate a JSON response from the LLM with JSON Mode enabled.
         
         Uses robust JSON extraction to handle models that return text before/after JSON.
+        Default temperature is 0.1 (precise, predictable) for structured output.
 
         Args:
             prompt: User prompt
             model: Model name
-            temperature: Temperature setting
+            temperature: Temperature setting (default 0.1 for precision)
             max_tokens: Maximum tokens to generate
             system_prompt: Optional system prompt
 
@@ -113,6 +122,7 @@ class LLMClient:
             temperature=temperature,
             max_tokens=max_tokens,
             system_prompt=system_prompt,
+            response_format={"type": "json_object"},  # Enable JSON Mode
         )
 
         # Apply robust JSON extraction (same as retry logic)
@@ -136,7 +146,7 @@ class LLMClient:
         self,
         prompt: str,
         model: str = DEFAULT_MODEL,
-        temperature: float = 0.3,
+        temperature: float = 0.1,
         max_tokens: int = 2048,
         system_prompt: Optional[str] = None,
         schema: Any = None,
@@ -145,12 +155,13 @@ class LLMClient:
         """Generate JSON with automatic self-correction retries and temporal context injection.
         
         Automatically injects current date/time to prevent "amnesia" in agents.
-        Handles models that return text before/after JSON with robust extraction.
+        Enables JSON Mode at model level for guaranteed valid output.
+        Default temperature is 0.1 (precise, predictable) for structured output.
         
         Args:
             prompt: Base prompt
             model: Model name
-            temperature: Temperature setting
+            temperature: Temperature setting (default 0.1 for precision)
             max_tokens: Maximum tokens
             system_prompt: Optional system prompt
             schema: Optional Pydantic model for validation
@@ -181,6 +192,7 @@ class LLMClient:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     system_prompt=current_system_prompt,
+                    response_format={"type": "json_object"},  # Enable JSON Mode
                 )
                 
                 # --- ROBUST JSON EXTRACTION LOGIC ---
@@ -319,13 +331,14 @@ def generate_response(
 def generate_json_response(
     prompt: str,
     model: str = DEFAULT_MODEL,
-    temperature: float = 0.3,
+    temperature: float = 0.1,
     max_tokens: int = 2048,
     system_prompt: Optional[str] = None,
 ) -> dict:
     """Generate a JSON response from the LLM.
 
     Convenience function using the singleton client.
+    Default temperature is 0.1 for precise, deterministic JSON output.
     """
     return llm_client.generate_json(
         prompt=prompt,
