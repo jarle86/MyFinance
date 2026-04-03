@@ -1,6 +1,6 @@
 """Database queries for MyFinance."""
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
@@ -402,6 +402,144 @@ def create_cuenta(
         commit=True,
     )
     return Cuenta(**result[0])
+
+
+def crear_cuenta_con_apertura(
+    user_id,
+    nombre,
+    tipo,
+    activa,
+    saldo_inicial,
+    balance,
+    limite_credito=None,
+    fecha_corte=None,
+    fecha_pago=None,
+    tasa_interes=None,
+    alerta_cuota=False,
+    fecha_vencimiento=None,
+    tasa_rendimiento=None,
+    monto_original=None,
+    alerta_vencimiento=False,
+    monto_pagado=0,
+    saldo_pendiente=0,
+):
+    """
+    Crea una cuenta y su asiento de apertura en el Ledger usando una transacción ACID.
+    """
+    from types import SimpleNamespace
+    from psycopg2.extras import RealDictCursor
+
+    conn = get_db_connection()
+
+    # Clasificación contable
+    CUENTAS_ACTIVO = ["efectivo", "banco", "inversion", "activo", "corretaje"]
+    CUENTAS_PASIVO = ["tarjeta_credito", "prestamo", "pasivo"]
+
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # --- 1. RESOLVER CUENTA DE PATRIMONIO ---
+            cur.execute(
+                """
+                SELECT id FROM cuentas 
+                WHERE nombre = 'Patrimonio de Apertura' AND usuario_id = %s
+            """,
+                (str(user_id),),
+            )
+            patrimonio = cur.fetchone()
+
+            if patrimonio:
+                patrimonio_id = patrimonio["id"]
+            else:
+                # Crear la cuenta de sistema si no existe
+                cur.execute(
+                    """
+                    INSERT INTO cuentas (usuario_id, nombre, tipo, saldo_actual, balance, activa)
+                    VALUES (%s, 'Patrimonio de Apertura', 'patrimonio', 0, 0, true)
+                    RETURNING id
+                """,
+                    (str(user_id),),
+                )
+                patrimonio_id = cur.fetchone()["id"]
+
+            # --- 2. INSERTAR LA NUEVA CUENTA ---
+            cur.execute(
+                """
+                INSERT INTO cuentas (
+                    usuario_id, nombre, tipo, activa, saldo_actual, balance, 
+                    limite_credito, fecha_corte, fecha_pago, tasa_interes, 
+                    alerta_cuota, fecha_vencimiento, tasa_rendimiento, 
+                    monto_original, alerta_vencimiento, monto_pagado, saldo_pendiente
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                ) RETURNING *
+            """,
+                (
+                    str(user_id),
+                    nombre,
+                    tipo,
+                    activa,
+                    saldo_inicial,
+                    balance,
+                    limite_credito,
+                    fecha_corte,
+                    fecha_pago,
+                    tasa_interes,
+                    alerta_cuota,
+                    fecha_vencimiento,
+                    tasa_rendimiento,
+                    monto_original,
+                    alerta_vencimiento,
+                    monto_pagado,
+                    saldo_pendiente,
+                ),
+            )
+            nueva_cuenta = cur.fetchone()
+            nueva_cuenta_id = nueva_cuenta["id"]
+
+            # --- 3. ASIENTO DE APERTURA (PARTIDA DOBLE) ---
+            if saldo_inicial > 0:
+                # Determinar Debe y Haber según naturaleza
+                if tipo in CUENTAS_ACTIVO:
+                    debe_id = nueva_cuenta_id
+                    haber_id = patrimonio_id
+                elif tipo in CUENTAS_PASIVO:
+                    debe_id = patrimonio_id
+                    haber_id = nueva_cuenta_id
+                else:
+                    debe_id = nueva_cuenta_id
+                    haber_id = patrimonio_id
+
+                # Insertar la transacción
+                cur.execute(
+                    """
+                    INSERT INTO transacciones (
+                        usuario_id, debe_id, haber_id, monto, concepto, 
+                        fecha, tipo, estado, fuente, naturaleza
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, 'confirmado', 'sistema', true
+                    )
+                """,
+                    (
+                        str(user_id),
+                        str(debe_id),
+                        str(haber_id),
+                        saldo_inicial,
+                        f"Asiento de Apertura - {nombre}",
+                        datetime.now().date(),
+                        "apertura",
+                    ),
+                )
+
+            # --- 4. COMMIT DE LA TRANSACCIÓN ACID ---
+            conn.commit()
+
+            return SimpleNamespace(**nueva_cuenta)
+
+    except Exception as e:
+        conn.rollback()  # 🛡️ EL SALVAVIDAS
+        raise Exception(f"Fallo en transacción ACID: {str(e)}")
+    finally:
+        db_pool.return_connection(conn)
 
 
 def update_cuenta(

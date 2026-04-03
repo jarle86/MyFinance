@@ -124,6 +124,7 @@ from database import (
     create_categoria,
     create_chat_topic,
     create_cuenta,
+    crear_cuenta_con_apertura,
     delete_categoria,
     delete_cuenta,
     delete_chat_topic,
@@ -196,12 +197,18 @@ if "messages" not in st.session_state:
 
 def is_logged_in() -> bool:
     """Check if user is logged in."""
-    return "user_id" in st.session_state and st.session_state.user_id is not None
+    # 🔥 BYPASS DESARROLLO
+    return True
+    # return "user_id" in st.session_state and st.session_state.user_id is not None
 
 
 def get_user_id() -> Optional[UUID]:
     """Get current user ID from session."""
     if is_logged_in():
+        # 🔥 BYPASS DESARROLLO: Retornar ID del usuario de prueba especificado
+        if "user_id" not in st.session_state:
+            st.session_state.user_id = UUID("9fad790c-73d0-4d53-bc8e-7221d64cb709") # Forza ID solicitado solo por esta ocasion se permite harcodear
+            st.session_state.username = "jarias"
         return st.session_state.user_id
     return None
 
@@ -1185,29 +1192,38 @@ def render_cuentas_tab(user_id: UUID):
                 try:
                     from decimal import Decimal
 
-                    cuenta = create_cuenta(
+                    # Debug: ensure user_id is valid
+                    if not user_id:
+                        st.error("Error: usuario no identificado")
+                        return
+
+                    # Llamada a la nueva función transaccional
+                    cuenta = crear_cuenta_con_apertura(
                         user_id,
                         nombre,
                         tipo,
-                        tipo in ["banco", "efectivo", "inversion"],
-                        Decimal(str(saldo_inicial)),
-                        Decimal(str(balance)),
-                        Decimal(str(limite_credito)) if limite_credito else None,
-                        int(fecha_corte) if fecha_corte else None,
-                        int(fecha_pago) if fecha_pago else None,
-                        Decimal(str(tasa_interes)) if tasa_interes else None,
-                        alerta_cuota,
-                        fecha_vencimiento,
-                        Decimal(str(tasa_rendimiento)) if tasa_rendimiento else None,
-                        Decimal(str(monto_original)) if monto_original else None,
-                        alerta_vencimiento,
-                        Decimal(str(monto_pagado)),
-                        Decimal(str(saldo_pendiente)),
+                        activa=tipo in ["banco", "efectivo", "inversion"],
+                        saldo_inicial=Decimal(str(saldo_inicial)),
+                        balance=Decimal(str(balance)),
+                        limite_credito=Decimal(str(limite_credito)) if limite_credito else None,
+                        fecha_corte=int(fecha_corte) if fecha_corte else None,
+                        fecha_pago=int(fecha_pago) if fecha_pago else None,
+                        tasa_interes=Decimal(str(tasa_interes)) if tasa_interes else None,
+                        alerta_cuota=alerta_cuota,
+                        fecha_vencimiento=fecha_vencimiento,
+                        tasa_rendimiento=Decimal(str(tasa_rendimiento)) if tasa_rendimiento else None,
+                        monto_original=Decimal(str(monto_original)) if monto_original else None,
+                        alerta_vencimiento=alerta_vencimiento,
+                        monto_pagado=Decimal(str(monto_pagado)),
+                        saldo_pendiente=Decimal(str(saldo_pendiente)),
                     )
-                    st.success(f"Cuenta '{cuenta.nombre}' creada")
+                    
+                    st.success(f"✓ Cuenta '{cuenta.nombre}' creada y asiento de apertura registrado en el Ledger.")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Error: {e}")
+                    # Capturamos el error propagado por el Rollback
+                    st.error(f"Error al crear la cuenta: {str(e)}")
+                    log_message("ERROR", f"Fallo en creación de cuenta: {str(e)}", st.session_state.get('username'))
 
     # Show cuentas
     if cuentas:
@@ -2410,11 +2426,12 @@ def main():
         """
         st.markdown(detect_js, unsafe_allow_html=True)
         
-        if st.session_state.get("show_register"):
-            register_page()
-        else:
-            login_page()
-        return
+        # if st.session_state.get("show_register"):
+        #     register_page()
+        # else:
+        #     login_page()
+        # return
+        pass # 🔥 BYPASS DESARROLLO
 
     user_id = get_user_id()
 

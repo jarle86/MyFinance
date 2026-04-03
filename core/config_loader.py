@@ -480,6 +480,18 @@ class ConfigLoader:
             raise ValueError(f"Required configuration '{key}' not found")
         return value
 
+    @classmethod
+    def get_ollama_cloud_key(cls) -> str:
+        """Get Ollama Cloud API Key."""
+        import os
+        return os.getenv("OLLAMA_CLOUD_API_KEY") or cls.get("OLLAMA_CLOUD_API_KEY")
+
+    @classmethod
+    def get_gemini_key(cls) -> str:
+        """Get Gemini API Key."""
+        import os
+        return os.getenv("GEMINI_API_KEY") or cls.get("GEMINI_API_KEY")
+
 
 # Convenience functions
 def get_task_classify() -> str:

@@ -7,6 +7,7 @@ from typing import Optional, Any
 from datetime import datetime
 
 from openai import OpenAI
+from ollama import Client as OllamaClient
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -18,36 +19,72 @@ DEFAULT_MODEL = "qwen2.5-coder:7b"  # Final fallback if nothing configured
 
 
 class LLMClient:
-    """Singleton LLM client for Ollama proxy."""
+    """Singleton LLM client with dynamic routing (Local, Cloud, Gemini)."""
 
     _instance: Optional["LLMClient"] = None
-    _client: Optional[OpenAI] = None
+    _clients: dict[str, OpenAI | OllamaClient] = {}
 
     def __new__(cls) -> "LLMClient":
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self) -> None:
-        if self._client is None:
-            self._init_client()
+    def _get_client_and_model(self, model: str) -> tuple[OpenAI | OllamaClient, str]:
+        """Determine provider and return the appropriate client and cleaned model name."""
+        from core.config_loader import ConfigLoader
+        
+        target_model = model
+        model_lower = model.lower()
+        
+        # 1. ESCENARIO: GEMINI (Google Cloud)
+        if "gemini" in model_lower:
+            provider = "gemini"
+            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+            api_key = ConfigLoader.get_gemini_key()
+            if not api_key or api_key == "dummy":
+                logger.warning("GEMINI_API_KEY no configurada. Intentando fallback local.")
+                provider = "local"
+        
+        # 2. ESCENARIO: OLLAMA CLOUD (ollama.com)
+        elif "cloud" in model_lower or "qwen3" in model_lower:
+            provider = "cloud"
+            # Si el modelo trae el prefijo 'cloud:', lo limpiamos
+            target_model = model[6:] if model_lower.startswith("cloud:") else model
+            base_url = "https://ollama.com/v1"
+            api_key = os.environ.get("OLLAMA_API_KEY") or ConfigLoader.get_ollama_cloud_key()
+            
+            if not api_key or api_key == "dummy":
+                logger.warning(f"OLLAMA_API_KEY no configurada para modelo de nube '{model}'. Intentando fallback local.")
+                provider = "local"
+                target_model = model
+        
+        # 3. ESCENARIO: OLLAMA LOCAL (localhost)
+        else:
+            provider = "local"
+            base_url = os.getenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
+            api_key = "ollama"
 
-    def _init_client(self) -> None:
-        """Initialize the OpenAI client."""
-        base_url = os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1")
-        api_key = os.getenv("OPENAI_API_KEY", "dummy")
-
-        self._client = OpenAI(
-            base_url=base_url,
-            api_key=api_key,
-        )
-
-    @property
-    def client(self) -> OpenAI:
-        """Get the OpenAI client."""
-        if self._client is None:
-            self._init_client()
-        return self._client
+        # Mantener caché de clientes para evitar reinicializaciones costosas
+        cache_key = f"{provider}_{base_url}"
+        if cache_key not in self._clients:
+            logger.info(f"[AI ROUTER] Conectando a {provider.upper()} en {base_url} (Timeout: 120s)")
+            
+            if provider == "cloud":
+                # Cliente NATIVO de Ollama para la nube
+                self._clients[cache_key] = OllamaClient(
+                    host="https://ollama.com",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=120.0
+                )
+            else:
+                # Cliente OpenAI para Local y Gemini
+                self._clients[cache_key] = OpenAI(
+                    base_url=base_url,
+                    api_key=api_key,
+                    timeout=120.0,
+                )
+            
+        return self._clients[cache_key], target_model
 
     def generate(
         self,
@@ -58,38 +95,41 @@ class LLMClient:
         system_prompt: Optional[str] = None,
         response_format: Optional[dict] = None,
     ) -> str:
-        """Generate a response from the LLM.
-
-        Args:
-            prompt: User prompt
-            model: Model name (default: qwen2.5)
-            temperature: Temperature setting
-            max_tokens: Maximum tokens to generate
-            system_prompt: Optional system prompt
-            response_format: Optional format spec (e.g., {"type": "json_object"})
-
-        Returns:
-            Generated text response
-        """
+        """Generate a response using the appropriate provider."""
+        client, target_model = self._get_client_and_model(model)
+        
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
         kwargs = {
-            "model": model,
+            "model": target_model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
 
-        # Add response_format if specified (JSON mode for Ollama)
         if response_format:
             kwargs["response_format"] = response_format
 
-        response = self.client.chat.completions.create(**kwargs)
-
-        return response.choices[0].message.content
+        logger.debug(f"[AI ROUTER] Generando con {target_model} via {client.__class__.__name__}")
+        
+        if isinstance(client, OllamaClient):
+            # Llamada nativa de Ollama
+            response = client.chat(
+                model=target_model,
+                messages=messages,
+                options={
+                    'temperature': temperature,
+                    'num_predict': max_tokens
+                }
+            )
+            return response['message']['content']
+        else:
+            # Llamada estándar de OpenAI (Local/Gemini)
+            response = client.chat.completions.create(**kwargs)
+            return response.choices[0].message.content
 
     def generate_json(
         self,
@@ -125,22 +165,23 @@ class LLMClient:
             response_format={"type": "json_object"},  # Enable JSON Mode
         )
 
-        # Apply robust JSON extraction (same as retry logic)
-        clean_text = response_text.strip()
+    def _parse_json_from_text(self, text: str) -> str:
+        """Helper to extract clean JSON from LLM response text."""
+        clean_text = text.strip()
 
-        # Remove markdown code fences
+        # Remove markdown code fences aggressively
         clean_text = re.sub(r"^```json\s*", "", clean_text, flags=re.MULTILINE)
         clean_text = re.sub(r"^```\s*", "", clean_text, flags=re.MULTILINE)
         clean_text = re.sub(r"\s*```$", "", clean_text, flags=re.MULTILINE)
 
-        # Find valid JSON boundaries
+        # Find JSON boundaries
         start_idx = clean_text.find("{")
         end_idx = clean_text.rfind("}")
 
         if start_idx != -1 and end_idx != -1:
             clean_text = clean_text[start_idx : end_idx + 1]
-
-        return json.loads(clean_text)
+            
+        return clean_text
 
     def generate_json_with_retry(
         self,
@@ -183,34 +224,54 @@ class LLMClient:
 
         current_prompt = prompt
         last_error = ""
+        client, target_model = self._get_client_and_model(model)
 
         for i in range(retries + 1):
+            response_text = ""
             try:
-                response_text = self.generate(
-                    prompt=current_prompt,
-                    model=model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    system_prompt=current_system_prompt,
-                    response_format={"type": "json_object"},  # Enable JSON Mode
-                )
+                # Determinar si usar response_format (algunos modelos de nube no lo soportan bien)
+                use_json_mode = "gemini" not in model.lower() # Bypass para Gemini si falla frecuentemente
+                
+                messages = []
+                if current_system_prompt:
+                    messages.append({"role": "system", "content": current_system_prompt})
+                messages.append({"role": "user", "content": current_prompt})
+
+                kwargs = {
+                    "model": target_model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                }
+                
+                if use_json_mode:
+                    kwargs["response_format"] = {"type": "json_object"}
+
+                if isinstance(client, OllamaClient):
+                    response = client.chat(
+                        model=target_model,
+                        messages=messages,
+                        options={
+                            'temperature': temperature,
+                            'num_predict': max_tokens
+                        }
+                    )
+                    response_text = response['message']['content']
+                else:
+                    response_text = client.chat.completions.create(**kwargs).choices[0].message.content
+
+                if not response_text or len(response_text.strip()) == 0:
+                    logger.error(f"❌ El modelo {target_model} devolvió una respuesta VACÍA. Posible bloqueo de seguridad o timeout.")
+                    raise ValueError(f"Respuesta vacía del proveedor para el modelo {target_model}")
 
                 # --- ROBUST JSON EXTRACTION LOGIC ---
-                clean_text = response_text.strip()
-
-                # Remove markdown code fences aggressively
-                clean_text = re.sub(r"^```json\s*", "", clean_text, flags=re.MULTILINE)
-                clean_text = re.sub(r"^```\s*", "", clean_text, flags=re.MULTILINE)
-                clean_text = re.sub(r"\s*```$", "", clean_text, flags=re.MULTILINE)
-
-                # Find JSON boundaries
-                start_idx = clean_text.find("{")
-                end_idx = clean_text.rfind("}")
-
-                if start_idx != -1 and end_idx != -1:
-                    clean_text = clean_text[start_idx : end_idx + 1]
-
-                data = json.loads(clean_text)
+                clean_text = self._parse_json_from_text(response_text)
+                
+                try:
+                    data = json.loads(clean_text)
+                except json.JSONDecodeError as je:
+                    logger.error(f"❌ Error de parseo JSON. RAW: {response_text[:300]}...")
+                    raise je
 
                 # --- SCHEMA VALIDATION ---
                 if schema:
@@ -224,7 +285,7 @@ class LLMClient:
 
             except Exception as e:
                 last_error = str(e)
-                logger.warning(f"⚠️  Intento {i + 1} fallido: {last_error[:100]}")
+                logger.warning(f"⚠️  Intento {i + 1} fallido para {model}: {last_error[:100]}")
 
                 if i < retries:
                     # Provide error feedback for self-correction
@@ -234,7 +295,7 @@ class LLMClient:
                     current_prompt = f"{prompt}\n\nERROR EN RESPUESTA ANTERIOR: {sanitized_error}\nPOR FAVOR: Responde SOLO un objeto JSON válido."
                 else:
                     logger.error(
-                        f"❌ Agotados {retries} reintentos. Error final: {last_error}"
+                        f"❌ Agotados {retries} reintentos en {model}. Error final: {last_error}"
                     )
                     raise e
 
@@ -249,13 +310,15 @@ class LLMClient:
         system_prompt: Optional[str] = None,
     ):
         """Generate a response using Tool Calling."""
+        client, target_model = self._get_client_and_model(model)
+        
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        response = self.client.chat.completions.create(
-            model=model,
+        response = client.chat.completions.create(
+            model=target_model,
             messages=messages,
             tools=tools,
             temperature=temperature,
@@ -272,25 +335,16 @@ class LLMClient:
         max_tokens: int = 2048,
         system_prompt: Optional[str] = None,
     ):
-        """Generate a streaming response from the LLM.
-
-        Args:
-            prompt: User prompt
-            model: Model name
-            temperature: Temperature setting
-            max_tokens: Maximum tokens to generate
-            system_prompt: Optional system prompt
-
-        Yields:
-            Text chunks as they are generated
-        """
+        """Generate a streaming response using the appropriate provider."""
+        client, target_model = self._get_client_and_model(model)
+        
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        response = self.client.chat.completions.create(
-            model=model,
+        response = client.chat.completions.create(
+            model=target_model,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
