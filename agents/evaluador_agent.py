@@ -12,8 +12,7 @@ from pydantic import BaseModel
 from typing import Literal
 
 from core.ai_utils import generate_json_response, get_model_for_task
-from core.config_loader import get_task_evaluate
-from core.validation import CAMPO_DEFAULT_THRESHOLDS
+from core.config_loader import get_task_evaluate, ConfigLoader
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +26,7 @@ class CampoEvaluado(BaseModel):
     es_requerido: bool = False
     accion: Literal["skip", "siguiente", "preguntar"] = "preguntar"
     pregunta: Optional[str] = None
+    metadata: Optional[dict] = None  # Bridge: stores UUID from Python validation for A5
 
 
 class EvaluacionSemantica(BaseModel):
@@ -89,7 +89,7 @@ class EvaluadorAgent:
             Tuple of (model, temperature, max_tokens, timeout)
         """
         from core.config_loader import ConfigLoader
-        
+
         model = ConfigLoader.get_model("A3") or "qwen2.5-coder:7b"
         temp = ConfigLoader.get_temp("A3")
         tokens = ConfigLoader.get_tokens("A3")
@@ -102,17 +102,17 @@ class EvaluadorAgent:
         try:
             prompt = f"Texto a evaluar:\n{texto}"
             model, temp, tokens, _ = self._get_model_config()
-            logger.info("[A3 EVALUAR] Inicio de evaluación A3", extra={"texto_corto": texto[:100], "model": model})
+            logger.info(f"[A3] INPUT: '{texto[:100]}...' MODEL={model} TEMP={temp}")
 
             from core.ai_utils import generate_json_with_retry
-            
+
             result = generate_json_with_retry(
                 prompt=prompt,
                 model=model,
                 temperature=temp,
                 max_tokens=tokens,
                 system_prompt=self._get_task_prompt(),
-                schema=None
+                schema=None,
             )
 
             logger.info(
@@ -124,9 +124,8 @@ class EvaluadorAgent:
 
             evaluacion = self._procesar_resultado_llm(result, texto)
             logger.info(
-                f"[A3 EVALUAR] OUTPUT estado_global='{evaluacion.estado_global}' "
-                f"campos_pendientes={[k for k,v in evaluacion.campos.items() if v.accion=='preguntar']} "
-                f"campos_completados={[k for k,v in evaluacion.campos.items() if v.accion=='siguiente']}"
+                f"[A3] OUTPUT estado_global='{evaluacion.estado_global}' "
+                f"pendientes={[k for k, v in evaluacion.campos.items() if v.accion == 'preguntar']}"
             )
             return evaluacion
 
@@ -157,17 +156,21 @@ class EvaluadorAgent:
             # LLM now returns nested dicts per field
             # E.g. "monto_total": {"valor": 500, "certeza": 95, "accion": "siguiente"}
             datos_del_campo = entidades_raw.get(campo_nombre, {})
-            
+
             # Extract actual value for validator
-            valor_extraido = datos_del_campo.get("valor") if isinstance(datos_del_campo, dict) else datos_del_campo
+            valor_extraido = (
+                datos_del_campo.get("valor")
+                if isinstance(datos_del_campo, dict)
+                else datos_del_campo
+            )
             # Convert to string for consistency with CampoEvaluado model
             valor_extraido = str(valor_extraido) if valor_extraido is not None else None
-            
+
             # Extract pre-calculated certeza from LLM to avoid redundant calls
             certeza_llm = None
             if isinstance(datos_del_campo, dict) and "certeza" in datos_del_campo:
                 certeza_llm = int(datos_del_campo.get("certeza", 0))
-            
+
             campo_eval = self._evaluar_campo(
                 nombre=campo_nombre,
                 valor=valor_extraido,
@@ -193,7 +196,7 @@ class EvaluadorAgent:
             "[A3 resumen] estado_global=%s preguntas=%s campos_pendientes=%s",
             estado,
             preguntas,
-            [k for k,v in campos_eval.items() if v.accion == "preguntar"],
+            [k for k, v in campos_eval.items() if v.accion == "preguntar"],
         )
 
         preguntas_agrupadas = self._agrupar_preguntas(preguntas) if preguntas else None
@@ -351,8 +354,8 @@ Responde solo con un número entre 0 y 100.
         return campo in self.CAMPOS_REQUERIDOS_DEFAULT
 
     def _get_threshold(self, campo: str) -> int:
-        """Get threshold for a field."""
-        return CAMPO_DEFAULT_THRESHOLDS.get(campo, 70)
+        """Get threshold for a field from ConfigLoader (DB)."""
+        return ConfigLoader.get_threshold_a3(campo)
 
     def _determinar_estado_global(
         self, campos: dict[str, CampoEvaluado]
@@ -373,12 +376,15 @@ Responde solo con un número entre 0 y 100.
                 )
                 return "PENDIENTE"
 
-        logger.info("[A3 _determinar_estado_global] Todos los campos requeridos completados")
+        logger.info(
+            "[A3 _determinar_estado_global] Todos los campos requeridos completados"
+        )
         return "COMPLETADO"
 
     def _generar_pregunta(self, campo: str) -> str:
         """Generate clarification question for a field."""
         from core.config_loader import ConfigLoader
+
         return ConfigLoader.get_pregunta_a3(campo)
 
     def _agrupar_preguntas(self, preguntas: list[str]) -> str:
@@ -425,20 +431,21 @@ Responde solo con un número entre 0 y 100.
         Returns:
             New EvaluacionSemantica with updated fields
         """
+        model, temp, tokens, _ = self._get_model_config()
+        prev_data = self._extraer_datos_validos(evaluacion_anterior)
+        logger.info(
+            f"[A3] RE_EVALUAR INPUT: prev={prev_data} user_response='{respuesta_usuario[:50]}...' MODEL={model} TEMP={temp}"
+        )
+
         texto_combinado = f"""
-Datos anteriores: {json.dumps(self._extraer_datos_validos(evaluacion_anterior))}
+Datos anteriores: {json.dumps(prev_data)}
 Nueva información del usuario: {respuesta_usuario}
 """
-        logger.info(
-            "[A3 re_evaluar] Re-evaluar con respuesta_usuario=%s, datos_previos=%s",
-            respuesta_usuario,
-            self._extraer_datos_validos(evaluacion_anterior),
-        )
         return self.evaluar(texto_combinado)
 
     def _extraer_datos_validos(self, evaluacion: EvaluacionSemantica) -> dict:
         """Extrae TODOS los valores capturados, válidos o no, para mantener la memoria.
-        
+
         IMPORTANTE: No filtrar por accion=="siguiente" porque eso causa amnesia.
         El LLM necesita VER los valores previos aunque Python aún no los haya validado.
         """

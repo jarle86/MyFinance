@@ -51,7 +51,7 @@ class ChatAgent:
             Tuple of (model, temperature, max_tokens, timeout)
         """
         from core.config_loader import ConfigLoader
-        
+
         model = ConfigLoader.get_model("A6") or "qwen3"
         temp = ConfigLoader.get_temp("A6")
         tokens = ConfigLoader.get_tokens("A6")
@@ -63,7 +63,7 @@ class ChatAgent:
         """Process a chat message."""
         try:
             model, temp, tokens, _ = self._get_model_config()
-            logger.info(f"[A6 CHAT] INPUT model='{model}' message='{message[:100]}'")
+            logger.info(f"[A6] INPUT: '{message[:80]}...' MODEL={model} TEMP={temp}")
 
             response = generate_response(
                 prompt=message,
@@ -72,11 +72,11 @@ class ChatAgent:
                 max_tokens=tokens,
                 system_prompt=self._get_task_prompt(),
             )
-            logger.info(f"[A6 CHAT] OUTPUT response='{str(response)[:150]}'")
+            logger.info(f"[A6] OUTPUT: '{str(response)[:80]}...'")
             return response
 
         except Exception as e:
-            logger.error(f"[A6 CHAT] ERROR: {e}", exc_info=True)
+            logger.error(f"[A6] ERROR: {e}", exc_info=True)
             return f"Lo siento, tuve un problema al procesar tu mensaje. ¿Podrías intentarlo de nuevo?"
 
     def humanize(self, technical_output: str, output_type: str = "result") -> str:
@@ -103,7 +103,7 @@ class ChatAgent:
             response = generate_response(
                 prompt=prompt,
                 model=model,
-                temperature=0.5,
+                temperature=temp,  # Use config instead of hardcoded 0.5
                 max_tokens=512,
             )
             return response
@@ -115,10 +115,12 @@ class ChatAgent:
         """Group pending questions from A3 evaluation into one message."""
         logger.info(
             f"[A6 AGRUPAR] INPUT campos_totales={list(evaluacion.campos.keys())} "
-            f"campos_pendientes={[k for k,v in evaluacion.campos.items() if v.accion=='preguntar']}"
+            f"campos_pendientes={[k for k, v in evaluacion.campos.items() if v.accion == 'preguntar']}"
         )
         if evaluacion.preguntas_agrupadas:
-            logger.info(f"[A6 AGRUPAR] OUTPUT (cache)='{evaluacion.preguntas_agrupadas[:100]}'")
+            logger.info(
+                f"[A6 AGRUPAR] OUTPUT (cache)='{evaluacion.preguntas_agrupadas[:100]}'"
+            )
             return evaluacion.preguntas_agrupadas
 
         preguntas = []

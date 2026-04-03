@@ -126,14 +126,14 @@ class ConfigLoader:
                 f"Timeout para {agente}",
                 "agentes",
             )
-            
+
             # Default models for each agent
             default_model = "qwen2.5-coder:7b"
             if agente == "A2":
                 default_model = "qwen2.5-vl"
             elif agente in ("A5", "A6"):
                 default_model = "qwen2.5-coder:7b"
-                
+
             _ensure_config(
                 cls,
                 f"MODELO_{agente}",
@@ -161,7 +161,9 @@ class ConfigLoader:
                     _ensure_config(
                         cls,
                         f"PREGUNTA_A3_{campo.upper()}",
-                        PREGUNTAS_DEFAULT_A3.get(campo, f"¿Podrías proporcionar {campo}?"),
+                        PREGUNTAS_DEFAULT_A3.get(
+                            campo, f"¿Podrías proporcionar {campo}?"
+                        ),
                         f"Pregunta aclaración A3 {campo}",
                         "agentes",
                     )
@@ -203,6 +205,13 @@ class ConfigLoader:
         )
         _ensure_config(
             cls,
+            "UMBRAL_FUZZY_A4",
+            "0.7",
+            "Threshold para fuzzy matching en A4",
+            "agentes",
+        )
+        _ensure_config(
+            cls,
             "KEYWORDS_ESCAPE",
             DEFAULTS["keywords_escape"],
             "Palabras clave para detener flujos",
@@ -218,11 +227,11 @@ class ConfigLoader:
         _ensure_config(
             cls,
             "BOT_HELP_MESSAGE",
-            "📖 Ayuda de MyFinance\n\nRegistrar gasto:\n\"Pagué $500 en taxi\"\n\"Gasté 200 en supermercado\"\n\nRegistrar ingreso:\n\"Recibí $10000 de salary\"\n\"Me pagaron $500\"\n\nConsultar:\n\"¿Cuánto gasté este mes?\"\n\"¿Cuál es mi balance?\"\n\nComandos:\n/start - Iniciar\n/help - Ver ayuda\n/cancel - Cancelar operación\n\nEnvía una imagen de tu receipt para procesarlo.",
+            '📖 Ayuda de MyFinance\n\nRegistrar gasto:\n"Pagué $500 en taxi"\n"Gasté 200 en supermercado"\n\nRegistrar ingreso:\n"Recibí $10000 de salary"\n"Me pagaron $500"\n\nConsultar:\n"¿Cuánto gasté este mes?"\n"¿Cuál es mi balance?"\n\nComandos:\n/start - Iniciar\n/help - Ver ayuda\n/cancel - Cancelar operación\n\nEnvía una imagen de tu receipt para procesarlo.',
             "Bot Help Message",
             "telegram",
         )
-        cls.load() # Reload after ensuring defaults
+        cls.load()  # Reload after ensuring defaults
 
     @classmethod
     def reload(cls) -> None:

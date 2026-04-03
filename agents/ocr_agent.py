@@ -4,6 +4,7 @@ Extracts text and monetary values from receipt images.
 """
 
 import base64
+import logging
 import os
 from io import BytesIO
 from typing import Optional
@@ -11,8 +12,10 @@ from typing import Optional
 from PIL import Image
 import fitz
 
-from core.config_loader import get_task_ocr
+from core.config_loader import get_task_ocr, ConfigLoader
 from core.ai_utils import generate_json_response, LLMClient, get_model_for_task
+
+logger = logging.getLogger(__name__)
 
 
 class OCRAgent:
@@ -63,7 +66,12 @@ class OCRAgent:
         Returns:
             Dict with extracted data
         """
+        model = get_model_for_task("A2")
+        temp = ConfigLoader.get_temp("A2")
+        logger.info(f"[A2] INPUT: image='{image_path}' MODEL={model} TEMP={temp}")
+
         if not os.path.exists(image_path):
+            logger.warning(f"[A2] IMAGE_NOT_FOUND: {image_path}")
             return {
                 "response": "Imagen no encontrada",
                 "error": "image_not_found",
@@ -135,7 +143,7 @@ class OCRAgent:
             image_b64 = self._encode_image_pil(image)
 
             from core.ai_utils import generate_json_response
-            
+
             messages = [
                 {"role": "system", "content": prompt},
                 {
@@ -154,17 +162,20 @@ class OCRAgent:
             ]
 
             logger.info(f"[A2 OCR] INPUT vision_model='{get_model_for_task('A2')}'")
-            
+
             data = generate_json_response(
                 prompt="Extrae datos del recibo.",
                 model=get_model_for_task("A2"),
-                temperature=0.2,
-                max_tokens=tokens if 'tokens' in locals() else 1024,
+                temperature=ConfigLoader.get_temp("A2"),
+                max_tokens=ConfigLoader.get_tokens("A2"),
                 system_prompt=prompt,
-                messages=messages # Passes vision messages directly
+                messages=messages,  # Passes vision messages directly
             )
 
-            logger.info(f"[A2 OCR] OUTPUT data={data}")
+            logger.info(f"[A2] OUTPUT: data={data}")
+            logger.info(
+                f"[A2] COMPLETED: monto={data.get('monto')} proveedor={data.get('proveedor')}"
+            )
 
             return {
                 "response": f"Recibo procesado: {data.get('monto', '?')} - {data.get('proveedor', '?')}",
@@ -173,6 +184,7 @@ class OCRAgent:
             }
 
         except Exception as e:
+            logger.error(f"[A2] ERROR: {str(e)}")
             return {
                 "response": f"OCR completado: {str(e)}",
                 "data": {

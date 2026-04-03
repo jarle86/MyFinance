@@ -50,20 +50,28 @@ class ClasificadorAgent:
         # Inyectar variables dinámicas de la DB (Regla #2)
         config = self._get_dynamic_config()
         keywords_escape = ConfigLoader.get_keywords_escape()
-        
+
         # Usar .replace en lugar de .format para evitar conflictos con llaves de JSON en el prompt
         final_prompt = prompt.replace("{keywords_escape}", keywords_escape)
-        final_prompt = final_prompt.replace("{umbral_certeza_clasificador}", str(config["min_certeza"]))
-        
+        final_prompt = final_prompt.replace(
+            "{umbral_certeza_clasificador}", str(config["min_certeza"])
+        )
+
         return final_prompt
 
     def classify(self, text: str) -> str:
         """Classify user input into intent."""
-        result = self._classify_json(text)
         config = self._get_dynamic_config()
+        logger.info(
+            f"[A1] INPUT: '{text[:100]}...' MODEL={config['modelo']} TEMP={config['temperature']}"
+        )
+
+        result = self._classify_json(text)
 
         if result["es_ambiguo"]:
-            logger.info(f"[A1 DECISION] '{text[:60]}' → ambiguo → fallback='{self.DEFAULT_INTENT}'")
+            logger.info(
+                f"[A1 DECISION] '{text[:60]}' → ambiguo → fallback='{self.DEFAULT_INTENT}'"
+            )
             return self.DEFAULT_INTENT
 
         certeza = result.get("certeza", 0)
@@ -75,7 +83,12 @@ class ClasificadorAgent:
             )
             return self.DEFAULT_INTENT
 
-        logger.info(f"[A1 DECISION] '{text[:60]}' → intencion='{result.get('intencion')}' certeza={certeza}")
+        logger.info(
+            f"[A1 DECISION] '{text[:60]}' → intencion='{result.get('intencion')}' certeza={certeza}"
+        )
+        logger.info(
+            f"[A1] OUTPUT: intent='{result.get('intencion', self.DEFAULT_INTENT)}'"
+        )
         return result.get("intencion", self.DEFAULT_INTENT)
 
     def _classify_json(self, text: str) -> dict:
@@ -85,7 +98,7 @@ class ClasificadorAgent:
         try:
             prompt = f"Mensaje: {text}"
             from core.ai_utils import generate_json_with_retry
-            
+
             result = generate_json_with_retry(
                 prompt=prompt,
                 model=get_model_for_task(config["modelo"]),

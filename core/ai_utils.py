@@ -14,7 +14,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "qwen2.5:3b"
+DEFAULT_MODEL = "qwen2.5-coder:7b"  # Final fallback if nothing configured
 
 
 class LLMClient:
@@ -82,7 +82,7 @@ class LLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        
+
         # Add response_format if specified (JSON mode for Ollama)
         if response_format:
             kwargs["response_format"] = response_format
@@ -100,7 +100,7 @@ class LLMClient:
         system_prompt: Optional[str] = None,
     ) -> dict:
         """Generate a JSON response from the LLM with JSON Mode enabled.
-        
+
         Uses robust JSON extraction to handle models that return text before/after JSON.
         Default temperature is 0.1 (precise, predictable) for structured output.
 
@@ -127,19 +127,19 @@ class LLMClient:
 
         # Apply robust JSON extraction (same as retry logic)
         clean_text = response_text.strip()
-        
+
         # Remove markdown code fences
-        clean_text = re.sub(r'^```json\s*', '', clean_text, flags=re.MULTILINE)
-        clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
-        clean_text = re.sub(r'\s*```$', '', clean_text, flags=re.MULTILINE)
-        
+        clean_text = re.sub(r"^```json\s*", "", clean_text, flags=re.MULTILINE)
+        clean_text = re.sub(r"^```\s*", "", clean_text, flags=re.MULTILINE)
+        clean_text = re.sub(r"\s*```$", "", clean_text, flags=re.MULTILINE)
+
         # Find valid JSON boundaries
-        start_idx = clean_text.find('{')
-        end_idx = clean_text.rfind('}')
-        
+        start_idx = clean_text.find("{")
+        end_idx = clean_text.rfind("}")
+
         if start_idx != -1 and end_idx != -1:
-            clean_text = clean_text[start_idx:end_idx+1]
-        
+            clean_text = clean_text[start_idx : end_idx + 1]
+
         return json.loads(clean_text)
 
     def generate_json_with_retry(
@@ -153,11 +153,11 @@ class LLMClient:
         retries: int = 2,
     ) -> dict | Any:
         """Generate JSON with automatic self-correction retries and temporal context injection.
-        
+
         Automatically injects current date/time to prevent "amnesia" in agents.
         Enables JSON Mode at model level for guaranteed valid output.
         Default temperature is 0.1 (precise, predictable) for structured output.
-        
+
         Args:
             prompt: Base prompt
             model: Model name
@@ -166,24 +166,24 @@ class LLMClient:
             system_prompt: Optional system prompt
             schema: Optional Pydantic model for validation
             retries: Number of retry attempts
-            
+
         Returns:
             Parsed and validated JSON response
         """
         import json
-        
+
         # --- AUTOMATIC TEMPORAL CONTEXT INJECTION ---
         now = datetime.now()
         time_context = f"[CONTEXTO TEMPORAL ACTUAL: {now.strftime('%A, %d de %B de %Y, %H:%M:%S (%z)')}]"
-        
+
         # Build enriched system prompt with temporal context
         current_system_prompt = system_prompt or ""
         if "[CONTEXTO TEMPORAL" not in current_system_prompt:
             current_system_prompt = f"{time_context}\n\n{current_system_prompt}"
-        
+
         current_prompt = prompt
         last_error = ""
-        
+
         for i in range(retries + 1):
             try:
                 response_text = self.generate(
@@ -194,24 +194,24 @@ class LLMClient:
                     system_prompt=current_system_prompt,
                     response_format={"type": "json_object"},  # Enable JSON Mode
                 )
-                
+
                 # --- ROBUST JSON EXTRACTION LOGIC ---
                 clean_text = response_text.strip()
-                
+
                 # Remove markdown code fences aggressively
-                clean_text = re.sub(r'^```json\s*', '', clean_text, flags=re.MULTILINE)
-                clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
-                clean_text = re.sub(r'\s*```$', '', clean_text, flags=re.MULTILINE)
-                
+                clean_text = re.sub(r"^```json\s*", "", clean_text, flags=re.MULTILINE)
+                clean_text = re.sub(r"^```\s*", "", clean_text, flags=re.MULTILINE)
+                clean_text = re.sub(r"\s*```$", "", clean_text, flags=re.MULTILINE)
+
                 # Find JSON boundaries
-                start_idx = clean_text.find('{')
-                end_idx = clean_text.rfind('}')
-                
+                start_idx = clean_text.find("{")
+                end_idx = clean_text.rfind("}")
+
                 if start_idx != -1 and end_idx != -1:
-                    clean_text = clean_text[start_idx:end_idx+1]
-                
+                    clean_text = clean_text[start_idx : end_idx + 1]
+
                 data = json.loads(clean_text)
-                
+
                 # --- SCHEMA VALIDATION ---
                 if schema:
                     if hasattr(schema, "model_validate"):
@@ -219,21 +219,25 @@ class LLMClient:
                     else:
                         instance = schema(**data)
                     return instance
-                
+
                 return data
-                
+
             except Exception as e:
                 last_error = str(e)
-                logger.warning(f"⚠️  Intento {i+1} fallido: {last_error[:100]}")
-                
+                logger.warning(f"⚠️  Intento {i + 1} fallido: {last_error[:100]}")
+
                 if i < retries:
                     # Provide error feedback for self-correction
-                    sanitized_error = last_error.replace('"', "'").replace('\n', ' ')[:150]
+                    sanitized_error = last_error.replace('"', "'").replace("\n", " ")[
+                        :150
+                    ]
                     current_prompt = f"{prompt}\n\nERROR EN RESPUESTA ANTERIOR: {sanitized_error}\nPOR FAVOR: Responde SOLO un objeto JSON válido."
                 else:
-                    logger.error(f"❌ Agotados {retries} reintentos. Error final: {last_error}")
+                    logger.error(
+                        f"❌ Agotados {retries} reintentos. Error final: {last_error}"
+                    )
                     raise e
-        
+
         return {}
 
     def generate_with_tools(
@@ -391,45 +395,36 @@ def test_llm_connection() -> bool:
 
 def get_model_for_task(task_module: str) -> str:
     """Get configured model for a specific task module.
-    
-    Hierarchy:
-    1. Database (sistema_config)
-    2. Environment (.env)
-    3. DEFAULT_MODEL fallback
-    """
-    import os
-    from database import get_config_value
 
-    key = f"MODELO_{task_module.upper()}"
-    
-    # 1. Database
-    model = get_config_value(key)
+    Hierarchy:
+    1. ConfigLoader (sistema_config via database)
+    2. DEFAULT_MODEL fallback
+    """
+    from core.config_loader import ConfigLoader
+
+    # 1. ConfigLoader reads from sistema_config
+    model = ConfigLoader.get_model(task_module)
     if model:
         return model
-        
-    # 2. Environment
-    model = os.getenv(key)
-    if model:
-        return model
-        
-    # 3. Default
+
+    # 2. Default fallback
     return DEFAULT_MODEL
 
 
 def get_temperature_for_task(task_module: str, default: float = 0.3) -> float:
     """Get configured temperature for a specific task module.
-    
+
     Allows fine-tuning LLM behavior per task from database without code changes.
-    
+
     Hierarchy:
     1. Database (sistema_config)
     2. Environment (.env)
     3. Default parameter
-    
+
     Args:
         task_module: Module name (e.g., "classification", "parsing", "evaluation")
         default: Default temperature if not configured
-        
+
     Returns:
         Temperature value (0.0-1.0)
     """
@@ -437,7 +432,7 @@ def get_temperature_for_task(task_module: str, default: float = 0.3) -> float:
     from database import get_config_value
 
     key = f"TEMPERATURA_{task_module.upper()}"
-    
+
     # 1. Database
     try:
         temp = get_config_value(key)
@@ -445,7 +440,7 @@ def get_temperature_for_task(task_module: str, default: float = 0.3) -> float:
             return float(temp)
     except Exception:
         pass
-        
+
     # 2. Environment
     temp = os.getenv(key)
     if temp:
@@ -453,7 +448,7 @@ def get_temperature_for_task(task_module: str, default: float = 0.3) -> float:
             return float(temp)
         except ValueError:
             pass
-        
+
     # 3. Default
     return default
 
