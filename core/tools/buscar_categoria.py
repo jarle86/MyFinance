@@ -71,48 +71,44 @@ def buscar_categoria(
 
 
 def _buscar_exacta(token: str, usuario_id: Optional[UUID]) -> Optional[dict]:
-    """Phase 1: Exact search using ILIKE.
-
-    Searches user categories first, then global categories.
+    """Phase 1: Exact search using ID (if UUID) or ILIKE name.
 
     Args:
         token: Normalized token
-        usuario_id: Optional user UUID
+        usuario_id: User UUID
 
     Returns:
         Dict with id and nombre if found, None otherwise
     """
-    if usuario_id:
+    import re
+    uuid_pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    
+    if re.match(uuid_pattern, token.lower()):
+        # Búsqueda directa por ID
         query = """
             SELECT id, nombre
             FROM categorias
-            WHERE usuario_id = %s
+            WHERE (usuario_id = %s OR usuario_id IS NULL)
+              AND id = %s
+              AND activa = TRUE
+            LIMIT 1
+        """
+        params = (str(usuario_id), token.lower())
+    else:
+        # Búsqueda por nombre
+        query = """
+            SELECT id, nombre
+            FROM categorias
+            WHERE (usuario_id = %s OR usuario_id IS NULL)
               AND activa = TRUE
               AND nombre ILIKE %s
             LIMIT 1
         """
-        like_pattern = f"%{token}%"
-        result = execute_query(
-            query,
-            (str(usuario_id), like_pattern),
-            fetch=True,
-        )
-        if result:
-            return result[0]
-
-    query = """
-        SELECT id, nombre
-        FROM categorias
-        WHERE usuario_id IS NULL
-          AND activa = TRUE
-          AND nombre ILIKE %s
-        LIMIT 1
-    """
-    like_pattern = f"%{token}%"
-    result = execute_query(query, (like_pattern,), fetch=True)
+        params = (str(usuario_id), f"%{token}%")
+    
+    result = execute_query(query, params, fetch=True)
     if result:
         return result[0]
-
     return None
 
 

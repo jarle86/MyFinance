@@ -436,6 +436,17 @@ def render_chat_page(user_id: UUID, channel: str):
     pending_confirmation = st.session_state.get("pending_confirmation", False)
     pending_data = st.session_state.get("pending_data", {})
 
+    # Check for pending conversation in Database (Interactive Mode)
+    from database import get_pending_conversation
+    db_pending = get_pending_conversation(user_id, channel)
+    
+    if db_pending and db_pending.estado != "finalizada":
+        st.info(f"""
+        📝 **Sesión Interactiva Abierta**
+        Estás en medio de un registro. Datos capturados: `{db_pending.datos}`.
+        Completa los campos faltantes o escribe **'cancelar'** para empezar de nuevo.
+        """, icon="ℹ️")
+
     # Topic selector in sidebar
     with st.sidebar:
         st.markdown("### 📋 Conversaciones")

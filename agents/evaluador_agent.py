@@ -52,7 +52,6 @@ class EvaluadorAgent:
         "categoria",
         "moneda",
         "fecha",
-        "concepto",
         "descripcion",
     ]
 
@@ -236,6 +235,18 @@ class EvaluadorAgent:
             es_requerido,
         )
 
+        # 🚀 EL FIX: Si el threshold es 0, es un campo de "confianza ciega" (autogenerado)
+        if threshold == 0 and valor:
+            logger.info(f"✨ [A3 _evaluar_campo] Campo {nombre} aceptado automáticamente (threshold=0)")
+            return CampoEvaluado(
+                nombre=nombre,
+                valor=valor,
+                certeza=100,
+                es_requerido=es_requerido,
+                accion="siguiente",
+                pregunta=None,
+            )
+
         if not valor:
             if es_requerido:
                 pregunta = self._generar_pregunta(nombre)
@@ -297,6 +308,18 @@ class EvaluadorAgent:
                 pregunta=None,
             )
 
+        # If optional field (es_requerido=false) AND has value → skip (don't ask)
+        # Only ask for required fields or fields with no value
+        if not es_requerido and valor:
+            return CampoEvaluado(
+                nombre=nombre,
+                valor=valor,
+                certeza=certeza,
+                es_requerido=es_requerido,
+                accion="skip",
+                pregunta=None,
+            )
+
         return CampoEvaluado(
             nombre=nombre,
             valor=valor,
@@ -343,7 +366,8 @@ Responde solo con un número entre 0 y 100.
             return 50
 
     def _es_campo_requerido(self, campo: str) -> bool:
-        """Check if a field is required for this user."""
+        """Check if a field is required - uses ConfigLoader (DB) with user_config override."""
+        # First: Check user-specific config (user can override required fields)
         agentes = self.user_config.get("agentes", {})
         a3_config = agentes.get("A3", {})
         requeridos = a3_config.get("requeridos", {})
@@ -351,7 +375,8 @@ Responde solo con un número entre 0 y 100.
         if campo in requeridos:
             return requeridos[campo]
 
-        return campo in self.CAMPOS_REQUERIDOS_DEFAULT
+        # Fallback: Use ConfigLoader which reads from sistema_config (REQUERIDO_A3_*)
+        return ConfigLoader.get_requerido_a3(campo)
 
     def _get_threshold(self, campo: str) -> int:
         """Get threshold for a field from ConfigLoader (DB)."""

@@ -23,7 +23,6 @@ A3_CAMPOS = [
     "categoria",
     "moneda",
     "fecha",
-    "concepto",
     "descripcion",
 ]
 
@@ -40,20 +39,7 @@ DEFAULTS = {
     "permitir_escritura_db": "true",
 }
 
-PREGUNTAS_DEFAULT_A3 = {
-    "monto_total": "¿Cuál es el monto total de la transacción?",
-    "monto": "¿Cuál es el monto (subtotal)?",
-    "monto_impuesto": "¿Cuál es el monto del impuesto?",
-    "monto_descuento": "¿Cuál es el monto del descuento?",
-    "monto_otros_cargos": "¿Hay otros cargos adicionales?",
-    "origen": "¿De dónde salió el dinero? (ej: Efectivo, Banco)",
-    "destino": "¿A dónde fue el dinero? (ej: Supermercado, Ahorros)",
-    "categoria": "¿Cuál es la categoría? (ej: Alimentación, Transporte)",
-    "moneda": "¿En qué moneda? (ej: DOP, USD)",
-    "fecha": "¿En qué fecha se realizó?",
-    "concepto": "¿Cuál es el concepto o detalle?",
-    "descripcion": "¿Tienes una descripción adicional?",
-}
+# Preguntas default se manejan dinámicamente o vía sistema_config
 
 
 def _ensure_config(
@@ -97,8 +83,13 @@ class ConfigLoader:
             cls._cache = get_all_config()
             cls._loaded = True
             cls._ensure_defaults()
-        except Exception:
-            cls._cache = {}
+        except Exception as e:
+            # BLINDAJE: No borrar el caché. Registrar el error crítico.
+            import logging
+            logger = logging.getLogger("config_loader")
+            logger.error(f"Error crítico conectando con sistema_config: {e}")
+            if not hasattr(cls, '_cache') or cls._cache is None:
+                cls._cache = {}
             cls._loaded = True
 
     @classmethod
@@ -364,9 +355,13 @@ class ConfigLoader:
 
     @classmethod
     def get_pregunta_a3(cls, campo: str) -> str:
-        """Get clarification question for A3 field."""
-        default_q = PREGUNTAS_DEFAULT_A3.get(campo, f"¿Podrías proporcionar {campo}?")
-        return cls.get(f"PREGUNTA_A3_{campo.upper()}", default_q)
+        """Obtiene la pregunta de aclaración desde la DB o un fallback genérico."""
+        db_question = cls.get(f"PREGUNTA_A3_{campo.upper()}")
+        if db_question:
+            return db_question
+        
+        # Fallback minimalista siguiendo la regla de no hardcodear frases detalladas
+        return f"¿Podrías proporcionar el valor para {campo}?"
 
     @classmethod
     def set_pregunta_a3(cls, campo: str, value: str) -> bool:
@@ -520,3 +515,8 @@ def get_task_chat() -> str:
 def get_task_evaluate() -> str:
     """Get the TASK_EVALUATE configuration."""
     return ConfigLoader.get_task(ConfigKeys.TASK_EVALUATE)
+
+
+def get_task_merge() -> str:
+    """Get the TASK_MERGE configuration."""
+    return ConfigLoader.get_task(ConfigKeys.TASK_MERGE)

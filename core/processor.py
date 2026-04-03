@@ -284,19 +284,18 @@ class Processor:
             if not campo:
                 continue
 
-            # REGLA DE ORO: Si el destino es nulo pero tenemos concepto/categoría, hacemos el 'salto'
-            if nombre == "destino" and (not campo.valor or campo.accion == "preguntar"):
-                token_alternativo = (
-                    campos.get("categoria").valor or campos.get("concepto").valor
-                )
-                if token_alternativo:
-                    logger.info(
-                        f"🔄 [PYTHON VALIDATION] Intentando 'salto' de Destino a: {token_alternativo}"
-                    )
-                    campo.valor = token_alternativo
 
             if not campo.valor:
                 continue
+
+        # 1.1 Resolución de Fecha Relativa (hoy)
+        fecha = campos.get("fecha")
+        if fecha and (not fecha.valor or "hoy" in str(fecha.valor).lower()):
+            from datetime import date
+            fecha.valor = date.today().isoformat()
+            fecha.certeza = 100
+            fecha.accion = "siguiente"
+            logger.info(f"📅 [PYTHON VALIDATION] Fecha resuelta como hoy: {fecha.valor}")
 
             # Búsqueda en DB (Fuzzy/Alias/Exacta)
             resultado = self.validation.validar_campo(
@@ -308,33 +307,29 @@ class Processor:
                 campo.valor = str(resultado["valor_resuelto"])
                 campo.certeza = 100
                 campo.accion = "siguiente"
-                # Importante: Guardar el UUID para el Agente 5
                 campo.metadata = {"uuid": resultado.get("uuid")}
             else:
-                # FALLO: No encontrado en DB pero MANTENER el valor con certeza reducida
-                # (Permite refinamiento iterativo sin amnesia)
+                # FALLO: No encontrado en DB
+                # Bajar certeza para forzar revisión/pregunta
                 logger.warning(
-                    f"[PYTHON VALIDATION] {nombre}='{campo.valor}' not found in DB. "
-                    f"Keeping value with reduced certainty for refinement."
+                    f"[PYTHON VALIDATION] {nombre}='{campo.valor}' not found in DB."
                 )
-                campo.certeza = max(
-                    30, campo.certeza - 30
-                )  # Baja certeza pero NO borra
-                campo.accion = (
-                    "siguiente"  # Permite avanzar pero marca como "soft pending"
-                )
-                # Opcionalmente: si quieres obligar a la pregunta, cambia a "preguntar"
-                # pero primer intenta pasar al siguiente turno
-                evaluacion.estado_global = (
-                    "PENDIENTE"  # Mantén como pendiente para saber que hay trabajo
-                )
+                campo.certeza = max(10, campo.certeza - 40)
+                
+                # Siempre obligamos a preguntar si no está en DB oficial, 
+                # para que el Agente o el usuario lo resuelvan.
+                campo.accion = "preguntar"
+                evaluacion.estado_global = "PENDIENTE"
 
         # 2. VERIFICACIÓN DE REQUERIDOS (Hard-Check)
-        # Si después de la validación, monto_total sigue sin valor, es PENDIENTE
+        # Monto es obligatorio
         monto = campos.get("monto_total")
         if not monto or not monto.valor or monto.valor == 0:
             monto.accion = "preguntar"
             evaluacion.estado_global = "PENDIENTE"
+        
+        # Si todo es "siguiente" pero hay algo pendiente de ID, no debería ser completado
+        # Pero por ahora confiamos en que 'preguntar' gatillará A6.
 
         return evaluacion
 
@@ -411,13 +406,33 @@ class Processor:
                 pending_conv, {"entidades": partial_data}
             )
 
-        result = self.accounting.merge_partial_data(
-            partial_data, text, usuario_id=str(user_id) if user_id else None
+        # 1. Extraer nuevas entidades de la respuesta del usuario usando A3
+        # Esto mantiene la inteligencia del LLM para entender qué dijo el usuario ahora
+        eval_actual = self.evaluador.evaluar(text)
+        
+        # 2. Validar esas nuevas entidades (para resolver UUIDs, normalizar montos, etc.)
+        python_res = self._validar_entidades_python(eval_actual)
+        
+        # 3. Fusionar determinísticamente en el estado parcial
+        # Los nuevos campos con valor sobreescriben los anteriores (o llenan huecos)
+        nuevas_entidades = python_res.get("entidades", {})
+        for k, v in nuevas_entidades.items():
+            if v is not None:
+                partial_data[k] = v
+        
+        # 4. Re-evaluar el estado GLOBAL fusionado
+        # Pasamos el JSON fusionado por el validador final (basado en lo que ya tenemos)
+        resultado_global = self._validar_entidades_python(
+            evaluacion_previa=None, # Forzamos re-validación base desde el dict
+            entidades_manual=partial_data
         )
+        
+        entidades_finales = resultado_global.get("entidades", {})
+        estado_global = resultado_global.get("estado_global", "PENDIENTE")
 
+        # 5. Manejo de Intentos
         if pending_conv.intentos >= 4:
             from database import cancel_pending_conversation
-
             cancel_pending_conversation(pending_conv.id)
             return ProcessResult(
                 route=Route.D,
@@ -425,27 +440,39 @@ class Processor:
                 action="CANCELADO",
             )
 
-        if result.get("action") == "PREGUNTAR":
+        # 6. Decidir siguiente paso basado en el Valencia de Validación (No en A4)
+        if estado_global == "PENDIENTE":
+            campo_faltante = resultado_global.get("campo_faltante")
+            pregunta = ConfigLoader.get_pregunta_a3(campo_faltante)
+            
             update_pending_conversation(
                 pending_conv.id,
-                datos=result.get("entidades", {}),
+                datos=entidades_finales,
                 intentos=pending_conv.intentos + 1,
                 estado="preguntando",
-                pregunta_actual=result.get("pregunta_aclaracion"),
-                dato_faltante=result.get("dato_faltante"),
+                pregunta_actual=pregunta,
+                dato_faltante=campo_faltante,
+                ultimo_mensaje=text
             )
 
-            checklist = self._generate_checklist(result.get("entidades", {}))
-            respuesta_final = f"{checklist}\n👉 {result.get('pregunta_aclaracion')}"
+            checklist = self._generate_checklist(entidades_finales)
+            respuesta_final = f"{checklist}\n👉 {pregunta}"
 
             return ProcessResult(
                 route=Route.D,
                 response=respuesta_final,
-                data=result,
+                data=resultado_global,
                 action="PREGUNTAR",
             )
 
-        return self._transition_to_confirmation(pending_conv, result)
+        # 7. Si está COMPLETADO, transformamos con A4 para el formato final y confirmamos
+        # Aquí A4 solo hace el mapeo técnico a AsientoContable
+        final_transform = self.accounting.process(
+            json.dumps(entidades_finales, ensure_ascii=False),
+            usuario_id=str(user_id) if user_id else None
+        )
+        
+        return self._transition_to_confirmation(pending_conv, final_transform)
 
     def _transition_to_confirmation(
         self, pending_conv, merge_result: dict
@@ -619,24 +646,27 @@ class Processor:
                     else json.loads(pending_conv.datos or "{}")
                 )
 
+                # 🚀 EL FIX: Aplanar el diccionario para extraer solo los valores útiles
+                datos_limpios = {}
+                if "campos" in transaction_data:
+                    for nombre, info in transaction_data["campos"].items():
+                        if info.get("valor") is not None:
+                            # Priorizamos el UUID guardado por Python Validation, si no, usamos el valor
+                            meta_uuid = info.get("metadata", {}).get("uuid") if info.get("metadata") else None
+                            datos_limpios[nombre] = meta_uuid if meta_uuid else info.get("valor")
+                else:
+                    datos_limpios = transaction_data
+
                 # A4: Final Parser JSON (Pure record mapping)
                 logger.info(
-                    f"[PIPELINE] A4 PARSE INPUT transaction_data={list(transaction_data.keys())}"
+                    f"[PIPELINE] A4 PARSE INPUT datos_limpios={list(datos_limpios.keys())}"
                 )
+                
+                # Le enviamos los datos limpios y aplanados al Agente A4
                 parsing_result = self.accounting.process(
-                    json.dumps(transaction_data),
+                    json.dumps(datos_limpios),
                     usuario_id=str(pending_conv.usuario_id),
                 )
-
-                if parsing_result.get("action") == "ERROR":
-                    logger.error(
-                        f"[PIPELINE] A4 PARSE ERROR: {parsing_result.get('response')}"
-                    )
-                    return ProcessResult(
-                        route=Route.D,
-                        response="Error técnico de formateo JSON (A4). ¿Qué dato deseas corregir?",
-                        action="CORREGIR",
-                    )
 
                 final_json = parsing_result.get("entidades", {})
                 logger.info(

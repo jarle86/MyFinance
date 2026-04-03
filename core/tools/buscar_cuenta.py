@@ -69,7 +69,7 @@ def buscar_cuenta(
 
 
 def _buscar_exacta(token: str, usuario_id: UUID) -> Optional[dict]:
-    """Phase 1: Exact search using ILIKE.
+    """Phase 1: Exact search using ID (if UUID) or ILIKE name.
 
     Args:
         token: Normalized token
@@ -78,22 +78,33 @@ def _buscar_exacta(token: str, usuario_id: UUID) -> Optional[dict]:
     Returns:
         Dict with id and nombre if found, None otherwise
     """
-    query = """
-        SELECT id, nombre
-        FROM cuentas
-        WHERE usuario_id = %s
-          AND activa = TRUE
-          AND nombre ILIKE %s
-        LIMIT 1
-    """
-    like_pattern = f"%{token}%"
+    import re
+    uuid_pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
     
-    result = execute_query(
-        query,
-        (str(usuario_id), like_pattern),
-        fetch=True,
-    )
-
+    if re.match(uuid_pattern, token.lower()):
+        # Búsqueda directa por ID
+        query = """
+            SELECT id, nombre
+            FROM cuentas
+            WHERE usuario_id = %s
+              AND id = %s
+              AND activa = TRUE
+            LIMIT 1
+        """
+        params = (str(usuario_id), token.lower())
+    else:
+        # Búsqueda por nombre
+        query = """
+            SELECT id, nombre
+            FROM cuentas
+            WHERE usuario_id = %s
+              AND activa = TRUE
+              AND nombre ILIKE %s
+            LIMIT 1
+        """
+        params = (str(usuario_id), f"%{token}%")
+    
+    result = execute_query(query, params, fetch=True)
     if result:
         return result[0]
     return None

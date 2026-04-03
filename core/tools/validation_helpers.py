@@ -6,17 +6,24 @@ from uuid import UUID
 
 
 def normalizar_token(token: str) -> str:
-    """Normalize a token for matching.
+    """Normalize a token for matching. Respects UUIDs.
 
     Args:
         token: Raw token from user input
 
     Returns:
-        Normalized token (lowercase, stripped, no special chars)
+        Normalized token (lowercase, stripped, no special chars unless it's a UUID)
     """
     if not token:
         return ""
+    
     token = token.strip()
+    
+    # Si parece un UUID, no normalizar eliminando guiones
+    uuid_pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    if re.match(uuid_pattern, token.lower()):
+        return token.lower()
+
     token = token.lower()
     token = re.sub(r"[^\w\s]", "", token)
     token = re.sub(r"\s+", " ", token)

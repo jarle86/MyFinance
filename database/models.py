@@ -367,6 +367,6 @@ class AsientoContable(BaseModel):
     monto_otros_cargos: Optional[float] = None
     moneda: Optional[str] = None
     fecha: Optional[str] = None
-    concepto: Optional[str] = None
+    descripcion: Optional[str] = None
     categoria: Optional[str] = None
     _razonamiento_previo: Optional[str] = None
