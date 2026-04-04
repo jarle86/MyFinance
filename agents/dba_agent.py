@@ -291,10 +291,13 @@ class DBAAgent:
 
             # 2. Resolver Categoría ID (opcional para la lógica contable estricta, pero se guarda)
             cat_id = extract_uuid(cat_val)
-            if not cat_id:
-                cat = get_categoria_by_nombre(cat_val)
+            if not cat_id and cat_val:
+                cat = get_categoria_by_nombre(cat_val, user_id)
                 if cat:
                     cat_id = str(cat.id)
+                    # REGLA ORO: Heredar el tipo de la categoría en lugar de defaulting a "gasto"
+                    if cat.tipo:
+                        tipo = cat.tipo.lower()
 
             # 3. Validar que tenemos ambas cuentas (Debe y Haber)
             if not origen_id:
@@ -321,7 +324,7 @@ class DBAAgent:
                 debe_id=debe_id,
                 haber_id=haber_id,
                 monto=monto,
-                concepto=transaction_data.get("descripcion") or "Registro 4.0",
+                concepto=transaction_data.get("concepto") or transaction_data.get("descripcion") or "Registro 4.0",
                 fecha=transaction_data.get("fecha"),
                 fuente=fuente,
                 proveedor=transaction_data.get("proveedor"),

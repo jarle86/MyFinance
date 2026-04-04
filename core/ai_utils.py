@@ -192,6 +192,7 @@ class LLMClient:
         system_prompt: Optional[str] = None,
         schema: Any = None,
         retries: int = 2,
+        custom_format: Optional[dict] = None,
     ) -> dict | Any:
         """Generate JSON with automatic self-correction retries and temporal context injection.
 
@@ -237,27 +238,37 @@ class LLMClient:
                     messages.append({"role": "system", "content": current_system_prompt})
                 messages.append({"role": "user", "content": current_prompt})
 
-                kwargs = {
-                    "model": target_model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                }
-                
-                if use_json_mode:
-                    kwargs["response_format"] = {"type": "json_object"}
-
                 if isinstance(client, OllamaClient):
-                    response = client.chat(
-                        model=target_model,
-                        messages=messages,
-                        options={
-                            'temperature': temperature,
-                            'num_predict': max_tokens
+                    # Preparar argumentos para Ollama Nativo
+                    ollama_kwargs = {
+                        "model": target_model,
+                        "messages": messages,
+                        "options": {
+                            "temperature": temperature,
+                            "num_predict": max_tokens
                         }
-                    )
+                    }
+                    # 🚀 INYECTAR LA JAULA EN OLLAMA
+                    if custom_format:
+                        ollama_kwargs["format"] = custom_format
+                    elif use_json_mode:
+                        ollama_kwargs["format"] = "json"
+                        
+                    response = client.chat(**ollama_kwargs)
                     response_text = response['message']['content']
                 else:
+                    # Preparar argumentos para OpenAI Compatible
+                    kwargs = {
+                        "model": target_model,
+                        "messages": messages,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                    }
+                    if custom_format:
+                        kwargs["response_format"] = custom_format
+                    elif use_json_mode:
+                        kwargs["response_format"] = {"type": "json_object"}
+                        
                     response_text = client.chat.completions.create(**kwargs).choices[0].message.content
 
                 if not response_text or len(response_text.strip()) == 0:
@@ -415,6 +426,7 @@ def generate_json_with_retry(
     system_prompt: Optional[str] = None,
     schema: Any = None,
     retries: int = 2,
+    custom_format: Optional[dict] = None,
 ) -> dict | Any:
     """Generate JSON with automatic self-correction retries.
 
@@ -428,6 +440,7 @@ def generate_json_with_retry(
         system_prompt=system_prompt,
         schema=schema,
         retries=retries,
+        custom_format=custom_format,
     )
 
 

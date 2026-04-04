@@ -103,6 +103,15 @@ class ValidationLayer:
         threshold = self.get_threshold(campo)
         requerido = self.get_requerido(campo)
 
+        if valor == "No Identificado":
+            return {
+                "es_valido": False,
+                "certeza": 0,
+                "valor_resuelto": None,
+                "fase": 0,
+                "pregunta": self._generar_pregunta(campo) if requerido else None,
+            }
+
         if not self.is_tool_enabled("buscar_entidad"):
             return {
                 "es_valido": requerido and bool(valor),

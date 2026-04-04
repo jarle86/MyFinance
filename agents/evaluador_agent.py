@@ -96,32 +96,101 @@ class EvaluadorAgent:
 
         return model, temp, tokens, timeout
 
-    def evaluar(self, texto: str) -> EvaluacionSemantica:
-        """Evaluate text for registration."""
+    def _construir_esquema_estricto(self, user_id: UUID) -> dict:
+        """Construye un JSON Schema dinámico forzando los ENUMs de la base de datos."""
+        from database import get_cuentas_by_user, get_categorias_by_user
+        
+        # 1. Obtener datos reales de la BD
+        cuentas_db = get_cuentas_by_user(user_id)
+        categorias_db = get_categorias_by_user(user_id)
+        
+        # 2. Extraer nombres (Añadimos "No Identificado" como fallback)
+        nombres_cuentas = [c.nombre for c in cuentas_db] if cuentas_db else []
+        if "No Identificado" not in nombres_cuentas:
+            nombres_cuentas.append("No Identificado")
+        
+        nombres_categorias = [c.nombre for c in categorias_db] if categorias_db else []
+        if "No Identificado" not in nombres_categorias:
+            nombres_categorias.append("No Identificado")
+
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "evaluacion_transaccion",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "_razonamiento_previo": {"type": "string"},
+                        "entidades": {
+                            "type": "object",
+                            "properties": {
+                                "monto": {"type": ["number", "null"]},
+                                "monto_total": {"type": ["number", "null"]},
+                                "monto_impuesto": {"type": ["number", "null"]},
+                                "monto_descuento": {"type": ["number", "null"]},
+                                "monto_otros_cargos": {"type": ["number", "null"]},
+                                "moneda": {"type": ["string", "null"]},
+                                "fecha": {"type": ["string", "null"]},
+                                "descripcion": {"type": ["string", "null"]},
+                                "origen": {"type": "string", "enum": nombres_cuentas},
+                                "destino": {"type": "string", "enum": nombres_cuentas},
+                                "categoria": {"type": "string", "enum": nombres_categorias}
+                            },
+                            "required": ["monto", "monto_total", "moneda", "fecha", "origen", "destino", "categoria"],
+                            "additionalProperties": False
+                        },
+                        "certeza": {"type": "number"},
+                        "es_ambiguo": {"type": "boolean"},
+                        "pregunta_aclaracion": {"type": ["string", "null"]}
+                    },
+                    "required": ["_razonamiento_previo", "entidades", "certeza", "es_ambiguo", "pregunta_aclaracion"],
+                    "additionalProperties": False
+                }
+            }
+        }
+
+    def evaluar(self, texto: str, user_id: Optional[UUID] = None) -> EvaluacionSemantica:
+        """Evaluate text using Structured Outputs and dynamic DB catalogs.
+        
+        Args:
+            texto: Raw text to evaluate
+            user_id: User UUID for fetching accounts/categories
+        """
         try:
-            prompt = f"Texto a evaluar:\n{texto}"
+            # Fallback to internal user_id if not provided
+            target_user_id = user_id or self.usuario_id
+            if not target_user_id:
+                logger.warning("[A3] No user_id provided for evaluation, using limited baseline logic.")
+            
+            # 1. Generar el esquema bloqueado al instante
+            esquema_estricto = self._construir_esquema_estricto(target_user_id) if target_user_id else None
+            
             model, temp, tokens, _ = self._get_model_config()
-            logger.info(f"[A3] INPUT: '{texto[:100]}...' MODEL={model} TEMP={temp}")
+            logger.info(f"[A3] INPUT: '{texto[:100]}...' MODEL={model} TEMP=0.0 (Forced for Strict Schema)")
 
+            # 2. Llamar al core de IA pasando el formato custom y forzando temperatura a 0.0
             from core.ai_utils import generate_json_with_retry
-
             result = generate_json_with_retry(
-                prompt=prompt,
+                prompt=f"Extrae y mapea la siguiente transacción a las cuentas y categorías proporcionadas en el esquema JSON.\n\nDATOS CRUDOS:\n{texto}",
                 model=model,
-                temperature=temp,
-                max_tokens=tokens,
+                temperature=0.0, 
                 system_prompt=self._get_task_prompt(),
-                schema=None,
+                custom_format=esquema_estricto
             )
 
             logger.info(
-                "[A3 EVALUAR] RAW LLM JSON keys=%s estado_global=%s entidades=%s",
-                list(result.keys()),
-                result.get("estado_global"),
-                list(result.get("entidades", result.get("campos", {})).keys()),
+                "[A3 EVALUAR] Structured Output received. Mapping to EvaluacionSemantica object."
             )
 
+            # 3. Mapear de vuelta al objeto EvaluacionSemantica para compatibilidad con el pipeline
             evaluacion = self._procesar_resultado_llm(result, texto)
+            
+            # Post-procesamiento de estado global basado en la lógica de Structured Output
+            entidades_check = result.get("entidades", {})
+            if entidades_check.get("origen") == "No Identificado" or entidades_check.get("monto_total") is None:
+                evaluacion.estado_global = "PENDIENTE"
+            
             logger.info(
                 f"[A3] OUTPUT estado_global='{evaluacion.estado_global}' "
                 f"pendientes={[k for k, v in evaluacion.campos.items() if v.accion == 'preguntar']}"
@@ -131,6 +200,7 @@ class EvaluadorAgent:
         except Exception as e:
             logger.error(f"[A3 EVALUAR] ERROR: {e}", exc_info=True)
             return self._crear_evaluacion_error(str(e))
+
 
     def _procesar_resultado_llm(
         self, result: dict, texto_original: str
@@ -144,31 +214,24 @@ class EvaluadorAgent:
         Returns:
             EvaluacionSemantica with validated fields
         """
-        # Extract using "campos" (new prompt) or "entidades" (legacy)
-        entidades_raw = result.get("campos", result.get("entidades", {}))
+        # 🚀 SE RESTAURA LA BÚSQUEDA DEL KEY "entidades" COMO RAÍZ SECUNDARIA
+        entidades_raw = result.get("entidades", {}) 
+
         razonamiento = result.get("_razonamiento_previo", "")
 
         campos_eval = {}
         preguntas = []
 
         for campo_nombre in self.CAMPOS_EVALUACION:
-            # LLM now returns nested dicts per field
-            # E.g. "monto_total": {"valor": 500, "certeza": 95, "accion": "siguiente"}
-            datos_del_campo = entidades_raw.get(campo_nombre, {})
-
-            # Extract actual value for validator
-            valor_extraido = (
-                datos_del_campo.get("valor")
-                if isinstance(datos_del_campo, dict)
-                else datos_del_campo
-            )
-            # Convert to string for consistency with CampoEvaluado model
+            # Obtenemos el valor directo (ej: result["monto_total"])
+            valor_extraido = entidades_raw.get(campo_nombre)
+            
+            # Convertimos a string para compatibilidad con el modelo Pydantic
             valor_extraido = str(valor_extraido) if valor_extraido is not None else None
 
-            # Extract pre-calculated certeza from LLM to avoid redundant calls
-            certeza_llm = None
-            if isinstance(datos_del_campo, dict) and "certeza" in datos_del_campo:
-                certeza_llm = int(datos_del_campo.get("certeza", 0))
+            # 🚀 OPTIMIZACIÓN EXTREMA: Como usamos ENUMs bloqueados, 
+            # si el LLM logró extraer un valor, la certeza es matemáticamente 100%
+            certeza_llm = 100 if valor_extraido else 0
 
             campo_eval = self._evaluar_campo(
                 nombre=campo_nombre,
@@ -445,7 +508,10 @@ Responde solo con un número entre 0 y 100.
         )
 
     def re_evaluar(
-        self, respuesta_usuario: str, evaluacion_anterior: EvaluacionSemantica
+        self, 
+        respuesta_usuario: str, 
+        evaluacion_anterior: EvaluacionSemantica,
+        user_id: Optional[UUID] = None
     ) -> EvaluacionSemantica:
         """Re-evaluate after user response in interactive mode.
 
@@ -455,6 +521,7 @@ Responde solo con un número entre 0 y 100.
 
         Returns:
             New EvaluacionSemantica with updated fields
+            user_id: User UUID for fetching accounts/categories
         """
         model, temp, tokens, _ = self._get_model_config()
         prev_data = self._extraer_datos_validos(evaluacion_anterior)
@@ -466,7 +533,7 @@ Responde solo con un número entre 0 y 100.
 Datos anteriores: {json.dumps(prev_data)}
 Nueva información del usuario: {respuesta_usuario}
 """
-        return self.evaluar(texto_combinado)
+        return self.evaluar(texto_combinado, user_id=user_id)
 
     def _extraer_datos_validos(self, evaluacion: EvaluacionSemantica) -> dict:
         """Extrae TODOS los valores capturados, válidos o no, para mantener la memoria.
@@ -479,4 +546,6 @@ Nueva información del usuario: {respuesta_usuario}
             # Si el campo tiene un valor, lo pasamos a la memoria (aunque sea para corregirlo)
             if campo.valor:
                 datos[nombre] = campo.valor
+                if campo.metadata and "uuid" in campo.metadata:
+                    datos[f"{nombre}_uuid"] = campo.metadata.get("uuid")
         return datos

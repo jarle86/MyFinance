@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-from .base_queries import execute_query, get_db_connection
+from .base_queries import db_pool, execute_query, get_db_connection
 from .models import (
     BalanceResponse,
     ChatMessage,
@@ -429,11 +429,11 @@ def crear_cuenta_con_apertura(
     from types import SimpleNamespace
     from psycopg2.extras import RealDictCursor
 
-    conn = get_db_connection()
+    conn = db_pool.get_connection()
 
     # Clasificación contable
-    CUENTAS_ACTIVO = ["efectivo", "banco", "inversion", "activo", "corretaje"]
-    CUENTAS_PASIVO = ["tarjeta_credito", "prestamo", "pasivo"]
+    CUENTAS_ACTIVO = ["efectivo", "banco", "inversion", "activo", "corretaje", "gasto", "costo"]
+    CUENTAS_PASIVO = ["tarjeta_credito", "prestamo", "pasivo", "patrimonio", "ingreso"]
 
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -453,8 +453,8 @@ def crear_cuenta_con_apertura(
                 # Crear la cuenta de sistema si no existe
                 cur.execute(
                     """
-                    INSERT INTO cuentas (usuario_id, nombre, tipo, saldo_actual, balance, activa)
-                    VALUES (%s, 'Patrimonio de Apertura', 'patrimonio', 0, 0, true)
+                    INSERT INTO cuentas (usuario_id, nombre, tipo, naturaleza, saldo_actual, balance, activa)
+                    VALUES (%s, 'Patrimonio de Apertura', 'patrimonio', true, 0, 0, true)
                     RETURNING id
                 """,
                     (str(user_id),),
@@ -462,21 +462,24 @@ def crear_cuenta_con_apertura(
                 patrimonio_id = cur.fetchone()["id"]
 
             # --- 2. INSERTAR LA NUEVA CUENTA ---
+            naturaleza_cuenta = False if tipo.lower() in CUENTAS_ACTIVO else True
+            
             cur.execute(
                 """
                 INSERT INTO cuentas (
-                    usuario_id, nombre, tipo, activa, saldo_actual, balance, 
+                    usuario_id, nombre, tipo, naturaleza, activa, saldo_actual, balance, 
                     limite_credito, fecha_corte, fecha_pago, tasa_interes, 
                     alerta_cuota, fecha_vencimiento, tasa_rendimiento, 
                     monto_original, alerta_vencimiento, monto_pagado, saldo_pendiente
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 ) RETURNING *
             """,
                 (
                     str(user_id),
                     nombre,
                     tipo,
+                    naturaleza_cuenta,
                     activa,
                     saldo_inicial,
                     balance,
@@ -513,7 +516,7 @@ def crear_cuenta_con_apertura(
                 cur.execute(
                     """
                     INSERT INTO transacciones (
-                        usuario_id, debe_id, haber_id, monto, concepto, 
+                        usuario_id, debe_id, haber_id, monto, descripcion, 
                         fecha, tipo, estado, fuente, naturaleza
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, 'confirmado', 'sistema', true
@@ -697,7 +700,7 @@ def get_categorias_by_user(usuario_id: UUID) -> list[Categoria]:
     """Get all categories for a user."""
     query = """
         SELECT id, usuario_id, nombre, icono, color, padre_id,
-               presupuesto, alerta_umbral, created_at, activa
+               tipo, presupuesto, alerta_umbral, created_at, activa
         FROM categorias
         WHERE usuario_id = %s AND activa = TRUE
         ORDER BY nombre
@@ -710,7 +713,7 @@ def get_default_categorias() -> list[Categoria]:
     """Get default system categories."""
     query = """
         SELECT id, usuario_id, nombre, icono, color, padre_id,
-               presupuesto, alerta_umbral, created_at, activa
+               tipo, presupuesto, alerta_umbral, created_at, activa
         FROM categorias
         WHERE usuario_id IS NULL
         ORDER BY nombre
@@ -730,17 +733,37 @@ def get_default_categorias() -> list[Categoria]:
     return [Categoria(**row) for row in cleaned]
 
 
-def get_categoria_by_nombre(nombre: str) -> Optional[Categoria]:
+def get_categoria_by_nombre(nombre: str, usuario_id: Optional[UUID] = None) -> Optional[Categoria]:
     """Get category by name (default or user)."""
-    query = """
-        SELECT id, usuario_id, nombre, icono, color, padre_id,
-               presupuesto, alerta_umbral, created_at, activa
-        FROM categorias
-        WHERE LOWER(nombre) = LOWER(%s)
-        LIMIT 1
-    """
-    result = execute_query(query, (nombre,), fetch=True)
-    return Categoria(**result[0]) if result else None
+    if usuario_id:
+        query = """
+            SELECT id, usuario_id, nombre, icono, color, padre_id,
+                   tipo, presupuesto, alerta_umbral, created_at, activa
+            FROM categorias
+            WHERE LOWER(nombre) = LOWER(%s) AND (usuario_id = %s OR usuario_id IS NULL)
+            ORDER BY usuario_id DESC NULLS LAST
+            LIMIT 1
+        """
+        result = execute_query(query, (nombre, str(usuario_id)), fetch=True)
+    else:
+        query = """
+            SELECT id, usuario_id, nombre, icono, color, padre_id,
+                   tipo, presupuesto, alerta_umbral, created_at, activa
+            FROM categorias
+            WHERE LOWER(nombre) = LOWER(%s)
+            LIMIT 1
+        """
+        result = execute_query(query, (nombre,), fetch=True)
+        
+    if not result:
+        return None
+        
+    # Fix NULL usuario_id for Pydantic on root categories
+    row = dict(result[0])
+    if row.get("usuario_id") is None:
+        row["usuario_id"] = "00000000-0000-0000-0000-000000000000"
+        
+    return Categoria(**row)
 
 
 def create_categoria(

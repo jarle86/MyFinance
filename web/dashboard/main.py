@@ -51,7 +51,27 @@ from typing import Optional
 from uuid import UUID
 
 import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 from dotenv import load_dotenv
+
+try:
+    from database.reportes_queries import (
+        obtener_reporte_consumos,
+        obtener_resumen_consumos,
+        obtener_reporte_presupuestos,
+        obtener_reporte_por_categoria,
+        obtener_reporte_cuentas,
+        obtener_balance_comprobacion,
+        obtener_saldos_por_tipo,
+        obtener_kpis_dashboard,
+        obtener_presupuestos_activos,
+        formatear_monto
+    )
+except ImportError:
+    pass # Guard in case the user has not implemented this file yet
+
 
 # Load environment from project root
 load_dotenv(os.path.join(_project_root, ".env"))
@@ -1048,10 +1068,358 @@ def render_transactions_page(user_id: UUID):
 
 
 def render_reports_page():
-    """Show reports page."""
-    st.header("📈 Reportes")
-
-    st.info("📌 Los reportes se generarán desde la base de datos")
+    """Renderiza el dashboard de reportes completo."""
+    
+    # Configuración de página
+    st.title("📊 Centro de Reportes")
+    st.caption("Análisis financiero en tiempo real")
+    
+    # Verificar sesión
+    if "user_id" not in st.session_state:
+        st.error("Sesión no encontrada. Accede desde el dashboard principal.")
+        st.stop()
+    
+    user_id = st.session_state.user_id
+    
+    # Check if report queries exist properly
+    if 'obtener_kpis_dashboard' not in globals():
+        st.error("Módulo de reportes no implementado en backend. Faltan reportes_queries.py")
+        st.stop()
+    
+    # ==========================================
+    # 📱 KPIs PRINCIPALES
+    # ==========================================
+    with st.container():
+        kpis = obtener_kpis_dashboard(user_id)
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        col1.metric(
+            "💸 Gastado (30 días)",
+            formatear_monto(kpis['total_gastado_mes']),
+            delta=f"{kpis['total_transacciones_mes']} txns"
+        )
+        
+        col2.metric(
+            "🏆 Top Categoría",
+            kpis['categoria_top'] or "N/A",
+            delta=formatear_monto(kpis['gasto_categoria_top']) if kpis['gasto_categoria_top'] else None
+        )
+        
+        col3.metric(
+            "📈 Débitos Totales",
+            formatear_monto(kpis['total_debitos'])
+        )
+        
+        col4.metric(
+            "📉 Créditos Totales",
+            formatear_monto(kpis['total_creditos'])
+        )
+    
+    st.divider()
+    
+    # ==========================================
+    # 📑 TABS DE REPORTES
+    # ==========================================
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📊 Consumos",
+        "💰 Presupuestos",
+        "🏷️ Por Categoría",
+        "🏦 Por Cuentas",
+        "📋 Balance"
+    ])
+    
+    # ==========================================
+    # TAB 1: CONSUMOS
+    # ==========================================
+    with tab1:
+        st.subheader("Movimientos del Período")
+        
+        # Filtros
+        col_f1, col_f2 = st.columns([1, 3])
+        with col_f1:
+            dias = st.selectbox(
+                "Período",
+                options=[7, 15, 30, 60, 90],
+                index=2,
+                format_func=lambda x: f"Últimos {x} días"
+            )
+        
+        # Cargar datos
+        df_consumos = obtener_reporte_consumos(user_id, dias=dias)
+        df_resumen = obtener_resumen_consumos(user_id, dias=dias)
+        
+        if df_consumos.empty:
+            st.info("No hay movimientos en este período.")
+        else:
+            # Gráfico de tendencia
+            if not df_resumen.empty:
+                st.subheader("📈 Tendencia de Gastos")
+                
+                fig_line = px.line(
+                    df_resumen,
+                    x='fecha',
+                    y='total_monto',
+                    title='Gastos por Día',
+                    markers=True
+                )
+                fig_line.update_layout(
+                    xaxis_title="Fecha",
+                    yaxis_title="Monto (DOP)",
+                    template="plotly_white"
+                )
+                st.plotly_chart(fig_line, use_container_width=True)
+            
+            # Detalle de movimientos
+            st.subheader("📋 Detalle de Transacciones")
+            
+            # Preparar dataframe para display
+            df_display = df_consumos.copy()
+            df_display['fecha'] = pd.to_datetime(df_display['fecha']).dt.strftime('%d/%m/%Y')
+            df_display['monto'] = df_display['monto'].apply(lambda x: formatear_monto(x))
+            df_display['monto_total'] = df_display['monto_total'].apply(lambda x: formatear_monto(x))
+            
+            st.dataframe(
+                df_display[['fecha', 'descripcion', 'cuenta_destino', 'monto_total', 'categorias']],
+                use_container_width=True,
+                hide_index=True
+            )
+    
+    # ==========================================
+    # TAB 2: PRESUPUESTOS
+    # ==========================================
+    with tab2:
+        st.subheader("Presupuestos vs Ejecución Real")
+        
+        # Selector de período
+        periodos = obtener_presupuestos_activos(user_id)
+        if periodos:
+            periodo_sel = st.selectbox(
+                "Período",
+                options=periodos,
+                format_func=lambda x: pd.to_datetime(x).strftime('%B %Y')
+            )
+        else:
+            periodo_sel = date.today().strftime('%Y-%m')
+        
+        df_presupuestos = obtener_reporte_presupuestos(user_id, periodo=periodo_sel)
+        
+        if df_presupuestos.empty:
+            st.info("No hay presupuestos configurados para este período.")
+        else:
+            # Gráfico de barras horizontal (ejecutado vs límite)
+            st.subheader("📊 Estado de Presupuestos")
+            
+            fig_bar = px.bar(
+                df_presupuestos,
+                y='categoria_nombre',
+                x=['monto_ejecutado', 'monto_disponible'],
+                title='Ejecutado vs Disponible',
+                orientation='h',
+                barmode='stack'
+            )
+            fig_bar.update_layout(
+                yaxis_title="Categoría",
+                xaxis_title="Monto (DOP)",
+                legend_title="Tipo",
+                template="plotly_white"
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
+            
+            # Tabla con métricas
+            st.subheader("📋 Detalle por Categoría")
+            
+            df_pres_display = df_presupuestos.copy()
+            df_pres_display['% Ejecución'] = df_pres_display['porcentaje_ejecutado'].apply(
+                lambda x: f"{x:.1f}%"
+            )
+            df_pres_display['Límite'] = df_pres_display['monto_limite'].apply(formatear_monto)
+            df_pres_display['Ejecutado'] = df_pres_display['monto_ejecutado'].apply(formatear_monto)
+            df_pres_display['Disponible'] = df_pres_display['monto_disponible'].apply(formatear_monto)
+            
+            # Color para alertas
+            def estado_alerta(alerta):
+                if alerta:
+                    return "⚠️ Alerta"
+                return "✅ Normal"
+            
+            df_pres_display['Estado'] = df_pres_display['alerta_limite'].apply(estado_alerta)
+            
+            st.dataframe(
+                df_pres_display[['categoria_nombre', 'Límite', 'Ejecutado', 'Disponible', '% Ejecución', 'Estado']],
+                use_container_width=True,
+                hide_index=True
+            )
+    
+    # ==========================================
+    # TAB 3: POR CATEGORÍA
+    # ==========================================
+    with tab3:
+        st.subheader("Gastos Agrupados por Categoría")
+        
+        df_categorias = obtener_reporte_por_categoria(user_id)
+        
+        if df_categorias.empty:
+            st.info("No hay datos de categorías.")
+        else:
+            # Gráfico de pastel
+            col_pie, col_bar = st.columns(2)
+            
+            with col_pie:
+                fig_pie = px.pie(
+                    df_categorias,
+                    values='total_monto',
+                    names='categoria_nombre',
+                    title='Distribución por Categoría',
+                    hole=0.4
+                )
+                fig_pie.update_layout(template="plotly_white")
+                st.plotly_chart(fig_pie, use_container_width=True)
+            
+            with col_bar:
+                fig_bar = px.bar(
+                    df_categorias,
+                    x='categoria_nombre',
+                    y='total_monto',
+                    title='Total por Categoría',
+                    color='categoria_naturaleza'
+                )
+                fig_bar.update_layout(
+                    xaxis_title="Categoría",
+                    yaxis_title="Monto (DOP)",
+                    template="plotly_white",
+                    showlegend=False
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
+            
+            # Tabla detallada
+            st.subheader("📋 Resumen por Categoría")
+            
+            df_cat_display = df_categorias.copy()
+            df_cat_display['Total'] = df_cat_display['total_monto'].apply(formatear_monto)
+            df_cat_display['% Total'] = (
+                df_cat_display['total_monto'] / df_cat_display['total_monto'].sum() * 100
+            ).apply(lambda x: f"{x:.1f}%")
+            
+            st.dataframe(
+                df_cat_display[['categoria_nombre', 'cantidad_transacciones', 'Total', '% Total']],
+                use_container_width=True,
+                hide_index=True
+            )
+    
+    # ==========================================
+    # TAB 4: POR CUENTAS
+    # ==========================================
+    with tab4:
+        st.subheader("Estado de Cuentas / Bolsillos")
+        
+        df_cuentas = obtener_reporte_cuentas(user_id)
+        
+        if df_cuentas.empty:
+            st.info("No hay cuentas registradas.")
+        else:
+            # KPIs por cuenta
+            col_ac1, col_ac2, col_ac3 = st.columns(3)
+            
+            total_balance = df_cuentas['balance_actual'].sum()
+            num_cuentas = len(df_cuentas)
+            cuenta_mayor = df_cuentas.loc[df_cuentas['balance_actual'].idxmax()]
+            
+            col_ac1.metric("💼 Total Patrim.", formatear_monto(total_balance))
+            col_ac2.metric("🏦 Cuentas Activas", str(num_cuentas))
+            col_ac3.metric("📈 Mayor Balance", cuenta_mayor['cuenta_nombre'])
+            
+            # Gráfico de balances
+            fig_cuentas = px.bar(
+                df_cuentas,
+                x='cuenta_nombre',
+                y='balance_actual',
+                title='Balance por Cuenta',
+                color='tipo_cuenta'
+            )
+            fig_cuentas.update_layout(
+                xaxis_title="Cuenta",
+                yaxis_title="Balance (DOP)",
+                template="plotly_white"
+            )
+            st.plotly_chart(fig_cuentas, use_container_width=True)
+            
+            # Tabla de cuentas
+            st.subheader("📋 Detalle de Cuentas")
+            
+            df_cuentas_display = df_cuentas.copy()
+            df_cuentas_display['balance_actual'] = df_cuentas_display['balance_actual'].apply(formatear_monto)
+            
+            st.dataframe(
+                df_cuentas_display[['cuenta_nombre', 'tipo_cuenta', 'balance_actual']],
+                use_container_width=True,
+                hide_index=True
+            )
+    
+    # ==========================================
+    # TAB 5: BALANCE
+    # ==========================================
+    with tab5:
+        st.subheader("Balance de Comprobación")
+        
+        balance = obtener_balance_comprobacion(user_id)
+        df_saldos_tipo = obtener_saldos_por_tipo(user_id)
+        
+        # Cards de resumen
+        col_b1, col_b2, col_b3 = st.columns(3)
+        
+        col_b1.metric(
+            "📈 Total Débitos",
+            formatear_monto(balance['total_debitos']),
+            delta=f"Dif: {formatear_monto(balance['diferencia'])}" if balance['diferencia'] != 0 else None
+        )
+        
+        col_b2.metric(
+            "📉 Total Créditos",
+            formatear_monto(balance['total_creditos'])
+        )
+        
+        estado_balance = "✅ Cuadrado" if balance['diferencia'] == 0 else "⚠️ Descuadrado"
+        col_b3.metric("Estado", estado_balance)
+        
+        # Verificación visual
+        if balance['diferencia'] == 0:
+            st.success("📗 El libro mayor está cuadrado. Débitos = Créditos")
+        else:
+            st.error(f"📕 Diferencia detectada: {formatear_monto(balance['diferencia'])}")
+        
+        # Gráfico de saldos por tipo
+        if not df_saldos_tipo.empty:
+            st.subheader("📊 Saldos por Tipo de Cuenta")
+            
+            fig_tipos = px.pie(
+                df_saldos_tipo,
+                values='total_balance',
+                names='tipo_cuenta',
+                title='Distribución por Tipo',
+                hole=0.4
+            )
+            fig_tipos.update_layout(template="plotly_white")
+            st.plotly_chart(fig_tipos, use_container_width=True)
+        
+        # Resumen final
+        st.subheader("📋 Resumen Ejecutivo")
+        
+        resumen_data = {
+            'Concepto': ['Total Débitos', 'Total Créditos', 'Diferencia', 'Saldos Pendientes'],
+            'Monto': [
+                formatear_monto(balance['total_debitos']),
+                formatear_monto(balance['total_creditos']),
+                formatear_monto(balance['diferencia']),
+                formatear_monto(abs(balance['diferencia'])) if balance['diferencia'] != 0 else "N/A"
+            ]
+        }
+        
+        st.table(pd.DataFrame(resumen_data))
+    
+    # Footer
+    st.divider()
+    st.caption("📊 MyFinance Reports | Datos actualizados en tiempo real")
 
 
 def render_categories_page():

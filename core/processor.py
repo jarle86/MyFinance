@@ -174,7 +174,7 @@ class Processor:
         texto_extraido = self._generar_texto_desde_ocr(ocr_data)
 
         logger.info(f"[PIPELINE] ROUTE=C OCR→A3 texto='{texto_extraido[:60]}...'")
-        evaluacion = self.evaluador.evaluar(texto_extraido)
+        evaluacion = self.evaluador.evaluar(texto_extraido, user_id=user_id)
 
         # Python Validation Layer (ALWAYS executed - A3 output is just a suggestion)
         # Python validates, infers, resolves entities, and determines final state
@@ -284,6 +284,16 @@ class Processor:
             if not campo or not campo.valor:
                 continue
 
+            # 🚀 EL FIX PARA EL BUCLE:
+            # Si el valor es "No Identificado", no intentamos validarlo en la DB.
+            # Lo marcamos como resuelto (None) para que deje de ser un impedimento.
+            if campo.valor == "No Identificado":
+                logger.info(f"ℹ️ [PYTHON VALIDATION] {nombre} marcado como No Identificado. Pasando...")
+                campo.valor = None
+                campo.certeza = 100
+                campo.accion = "siguiente" 
+                continue
+
             # Búsqueda en DB (Fuzzy/Alias/Exacta)
             resultado = self.validation.validar_campo(
                 campo=nombre, valor=campo.valor, usuario_id=user_id
@@ -304,24 +314,44 @@ class Processor:
                 campo.accion = "preguntar"
                 evaluacion.estado_global = "PENDIENTE"
 
-        # 1.1 Resolución de Fecha Relativa (hoy)
+        # 1.1 Resolución de Fecha (Relativa o faltante)
         fecha = campos.get("fecha")
-        if fecha and (not fecha.valor or "hoy" in str(fecha.valor).lower()):
-            from datetime import date
-            fecha.valor = date.today().isoformat()
+        # Si no hay fecha o es una palabra relativa
+        if fecha and (not fecha.valor or any(x in str(fecha.valor).lower() for x in ["hoy", "ayer", "antes"])):
+            from datetime import date, timedelta
+            hoy = date.today()
+            
+            val_txt = str(fecha.valor).lower() if fecha.valor else ""
+            
+            if "antes de ayer" in val_txt:
+                fecha.valor = (hoy - timedelta(days=2)).isoformat()
+            elif "ayer" in val_txt:
+                fecha.valor = (hoy - timedelta(days=1)).isoformat()
+            else:
+                fecha.valor = hoy.isoformat()
+            
+            # 🚀 EL FIX CRÍTICO:
             fecha.certeza = 100
-            fecha.accion = "siguiente"
-            logger.info(f"📅 [PYTHON VALIDATION] Fecha resuelta como hoy: {fecha.valor}")
+            fecha.accion = "siguiente" # <--- Esto detiene la pregunta
+            fecha.pregunta = None      # <--- Limpiamos la pregunta
+            logger.info(f"📅 [PYTHON VALIDATION] Fecha resuelta y accion actualizada: {fecha.valor}")
 
-        # 2. VERIFICACIÓN DE REQUERIDOS (Hard-Check)
-        # Monto es obligatorio
+        # 2. VERIFICACIÓN DE REQUERIDOS (Hard-Check Dinámico)
+        # Evaluamos el monto nulo o en 0 SOLO si sistema_config lo marca como requerido
         monto = campos.get("monto_total")
-        if not monto or not monto.valor or monto.valor == 0:
-            monto.accion = "preguntar"
-            evaluacion.estado_global = "PENDIENTE"
+        if monto and monto.es_requerido:
+            if not monto.valor or str(monto.valor) in ["0", "0.0"]:
+                monto.accion = "preguntar"
+
+        # 3. RECALCULAR ESTADO GLOBAL (Al final del método)
+        # Esto es vital: si Python arregló lo que faltaba, el estado DEBE ser COMPLETADO
+        hay_pendientes = any(c.accion == "preguntar" for c in campos.values() if c.es_requerido)
         
-        # Si todo es "siguiente" pero hay algo pendiente de ID, no debería ser completado
-        # Pero por ahora confiamos en que 'preguntar' gatillará A6.
+        if not hay_pendientes:
+            evaluacion.estado_global = "COMPLETADO"
+            logger.info("✅ [PYTHON VALIDATION] Estado global actualizado a COMPLETADO")
+        else:
+            evaluacion.estado_global = "PENDIENTE"
 
         return evaluacion
 
@@ -361,110 +391,6 @@ class Processor:
                 route=Route.A,
                 response=f"Comando no reconocido: {command}\n\n{self._get_help_message()}",
             )
-
-    def _handle_slot_filling(
-        self,
-        pending_conv,
-        text: str,
-        user_id: Optional[UUID],
-    ) -> ProcessResult:
-        """Handle slot filling phase with intelligent merge and checklist generation."""
-        from agents.accounting_agent import AccountingAgent
-        from database import update_pending_conversation
-
-        text_lower = text.lower().strip()
-
-        partial_data = (
-            pending_conv.datos
-            if isinstance(pending_conv.datos, dict)
-            else json.loads(pending_conv.datos or "{}")
-        )
-
-        confirm_keywords_simple = [
-            "sí",
-            "si",
-            "correcto",
-            "yes",
-            "así es",
-            "asi es",
-            "confirmar",
-        ]
-
-        es_confirm_simple = text_lower in confirm_keywords_simple
-
-        if pending_conv.dato_faltante == "confirmacion_explicita" and es_confirm_simple:
-            logger.debug("Loop prevention: confirmacion_explicita + respuesta simple")
-            return self._transition_to_confirmation(
-                pending_conv, {"entidades": partial_data}
-            )
-
-        # 1. Extraer nuevas entidades de la respuesta del usuario usando A3
-        # Esto mantiene la inteligencia del LLM para entender qué dijo el usuario ahora
-        eval_actual = self.evaluador.evaluar(text)
-        
-        # 2. Validar esas nuevas entidades (para resolver UUIDs, normalizar montos, etc.)
-        python_res = self._validar_entidades_python(eval_actual)
-        
-        # 3. Fusionar determinísticamente en el estado parcial
-        # Los nuevos campos con valor sobreescriben los anteriores (o llenan huecos)
-        nuevas_entidades = python_res.get("entidades", {})
-        for k, v in nuevas_entidades.items():
-            if v is not None:
-                partial_data[k] = v
-        
-        # 4. Re-evaluar el estado GLOBAL fusionado
-        # Pasamos el JSON fusionado por el validador final (basado en lo que ya tenemos)
-        resultado_global = self._validar_entidades_python(
-            evaluacion_previa=None, # Forzamos re-validación base desde el dict
-            entidades_manual=partial_data
-        )
-        
-        entidades_finales = resultado_global.get("entidades", {})
-        estado_global = resultado_global.get("estado_global", "PENDIENTE")
-
-        # 5. Manejo de Intentos
-        if pending_conv.intentos >= 4:
-            from database import cancel_pending_conversation
-            cancel_pending_conversation(pending_conv.id)
-            return ProcessResult(
-                route=Route.D,
-                response="⚠️ Límite de intentos alcanzado. Registro cancelado.",
-                action="CANCELADO",
-            )
-
-        # 6. Decidir siguiente paso basado en el Valencia de Validación (No en A4)
-        if estado_global == "PENDIENTE":
-            campo_faltante = resultado_global.get("campo_faltante")
-            pregunta = ConfigLoader.get_pregunta_a3(campo_faltante)
-            
-            update_pending_conversation(
-                pending_conv.id,
-                datos=entidades_finales,
-                intentos=pending_conv.intentos + 1,
-                estado="preguntando",
-                pregunta_actual=pregunta,
-                dato_faltante=campo_faltante,
-                ultimo_mensaje=text
-            )
-
-            checklist = self._generate_checklist(entidades_finales)
-            respuesta_final = f"{checklist}\n👉 {pregunta}"
-
-            return ProcessResult(
-                route=Route.D,
-                response=respuesta_final,
-                data=resultado_global,
-                action="PREGUNTAR",
-            )
-
-        # 7. Si está COMPLETADO, transformamos con A4 para el formato final y confirmamos
-        # Aquí A4 solo hace el mapeo técnico a AsientoContable
-        final_transform = self.accounting.process(
-            json.dumps(entidades_finales, ensure_ascii=False),
-            usuario_id=str(user_id) if user_id else None
-        )
-        
-        return self._transition_to_confirmation(pending_conv, final_transform)
 
     def _transition_to_confirmation(
         self, pending_conv, merge_result: dict
@@ -779,7 +705,7 @@ class Processor:
                 "[Modo interactivo] Re-evaluando datos: %s",
                 {"texto": text, "previo": eval_anterior.model_dump()},
             )
-            eval_nueva = self.evaluador.re_evaluar(text, eval_anterior)
+            eval_nueva = self.evaluador.re_evaluar(text, eval_anterior, user_id=user_id)
 
             logger.info(
                 "[Modo interactivo] Resultado A3 estado_global=%s, campos_pendientes=%s",
@@ -884,7 +810,7 @@ class Processor:
 
         if intent == "registro":
             logger.info(f"[PIPELINE] A3 EVALUADOR INPUT='{text[:80]}'")
-            evaluu_raw = self.evaluador.evaluar(text)
+            evaluu_raw = self.evaluador.evaluar(text, user_id=user_id)
             logger.info(
                 f"[PIPELINE] A3 EVALUADOR OUTPUT estado_global='{evaluu_raw.estado_global}' campos_pendientes={[k for k, v in evaluu_raw.campos.items() if v.accion == 'preguntar']}"
             )

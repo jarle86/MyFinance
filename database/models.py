@@ -77,7 +77,7 @@ class CuentaBase(BaseModel):
 
     nombre: str
     tipo: TipoCuenta
-    naturaleza: bool = True  # True = credit increases
+    naturaleza: bool = False  # False = debit increases (Deudora, e.g. Activos/Bancos)
     saldo_inicial: Decimal = Decimal("0")
     saldo_actual: Decimal = Decimal("0")
     balance: Decimal = Decimal("0")  # Current balance
@@ -122,6 +122,7 @@ class CategoriaBase(BaseModel):
     nombre: str
     icono: Optional[str] = None
     color: Optional[str] = None
+    tipo: Optional[str] = "gasto"
     presupuesto: Optional[Decimal] = None
     alerta_umbral: Optional[Decimal] = None
     # Alias support for multiple names/synonyms

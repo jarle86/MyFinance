@@ -68,9 +68,25 @@ class AccountingAgent:
         logger.info(f"[A4] TRANSFORMING: input_len={len(data_json)} MODEL={model}")
 
         try:
+            import json
             from core.ai_utils import generate_json_with_retry
+            from database import get_categoria_by_nombre
 
-            # 1. Quitamos schema=AsientoContable para que Pydantic no borre los datos anidados
+            # 1. Enriquecer data_json con el tipo de la categoría (Ingreso vs Gasto)
+            try:
+                parsed_data = json.loads(data_json)
+                ents = parsed_data.get("entidades", parsed_data)
+                cat_val = ents.get("categoria")
+                if cat_val and cat_val != "No Identificado":
+                    cat = get_categoria_by_nombre(cat_val, usuario_id)
+                    if cat and cat.tipo:
+                        contexto = f"CONTEXTO VITAL: La categoría '{cat.nombre}' es de TIPO: '{cat.tipo}'. Aplica las reglas de Partida Doble en base a esto."
+                        parsed_data["contexto_sistema"] = contexto
+                        data_json = json.dumps(parsed_data)
+            except Exception as e:
+                logger.warning(f"[A4] Error inyectando contexto de categoría: {e}")
+
+            # 2. Quitamos schema=AsientoContable para que Pydantic no borre los datos anidados
             result = generate_json_with_retry(
                 prompt=data_json,
                 model=model,

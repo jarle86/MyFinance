@@ -55,3 +55,4 @@ node_modules/
 check-jarle.sh
 docs/
 AGENTS.md
+.agents/
